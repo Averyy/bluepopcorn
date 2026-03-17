@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import httpx
+
+from .config import Settings
+from .seerr import SeerrClient
+from .weather import get_weather, get_pollen
+
+log = logging.getLogger(__name__)
+
+
+class MorningDigest:
+    def __init__(self, settings: Settings, seerr: SeerrClient) -> None:
+        self.settings = settings
+        self.seerr = seerr
+        self.client = httpx.AsyncClient(timeout=15)
+
+    async def build(self) -> str:
+        """Build the morning digest message."""
+        weather, pollen, media = await asyncio.gather(
+            get_weather(self.settings, self.client),
+            get_pollen(self.settings, self.client),
+            self._get_media_status(),
+        )
+
+        parts: list[str] = []
+        if weather:
+            parts.append(weather)
+        if pollen:
+            parts.append(pollen)
+        if media:
+            parts.append(media)
+
+        if not parts:
+            return "Good morning. Couldn't fetch any updates right now."
+
+        return "Good morning. " + " ".join(parts)
+
+    async def _get_media_status(self) -> str | None:
+        """Get media status from Seerr."""
+        try:
+            available_result, pending_result = await asyncio.gather(
+                self._fetch_available(),
+                self._fetch_pending(),
+            )
+
+            parts: list[str] = []
+            if available_result:
+                parts.append(available_result)
+            if pending_result:
+                parts.append(pending_result)
+
+            return ". ".join(parts) + "." if parts else None
+
+        except Exception as e:
+            log.error("Media status fetch failed: %s", e)
+            return None
+
+    async def _fetch_available(self) -> str | None:
+        """Fetch recently available media from Seerr."""
+        try:
+            available = await self.seerr.get_recent_available()
+            if available:
+                titles = []
+                for req in available[:3]:
+                    media = req.get("media", {})
+                    title = media.get("title") or media.get("name", "")
+                    if title:
+                        titles.append(title)
+                if titles:
+                    return f"Recently available: {', '.join(titles)}"
+        except Exception as e:
+            log.debug("Failed to fetch available media: %s", e)
+        return None
+
+    async def _fetch_pending(self) -> str | None:
+        """Fetch pending requests from Seerr."""
+        try:
+            pending = await self.seerr.get_pending()
+            if pending:
+                return f"{len(pending)} request{'s' if len(pending) != 1 else ''} pending"
+        except Exception as e:
+            log.debug("Failed to fetch pending requests: %s", e)
+        return None
+
+    async def close(self) -> None:
+        await self.client.aclose()

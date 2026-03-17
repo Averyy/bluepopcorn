@@ -1,0 +1,38 @@
+[llm]
+model = "haiku"
+fallback_model = "sonnet"
+timeout = 30
+
+[polling]
+interval = 0.5
+debounce_delay = 0.3
+
+[digest]
+time = "07:30"
+
+[location]
+# St. Catharines for weather; pollen API hits nearest station (Hamilton)
+latitude = 43.1594
+longitude = -79.2469
+name = "St. Catharines"
+timezone = "America/Toronto"
+
+[paths]
+poster_dir = "~/Pictures/imessagarr"
+db_path = "~/.local/share/imessagarr/bot.db"
+chat_db_path = "~/Library/Messages/chat.db"
+
+[messages]
+max_length = 1200
+history_window = 20
+history_gap_hours = 1.0
+
+[notifications]
+quiet_start = "22:00"
+quiet_end = "07:00"
+
+[webhooks]
+port = 8095
+
+[logging]
+level = "INFO"
