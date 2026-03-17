@@ -31,7 +31,7 @@ class SeerrError(Exception):
 
 
 class SeerrConnectionError(SeerrError):
-    """Seerr server is unreachable or timed out."""
+    """HTTP connection failed or timed out."""
 
 
 class SeerrAuthError(SeerrError):
@@ -62,7 +62,7 @@ class SeerrClient:
                 json={"email": self.email, "password": self.password},
             )
         except (httpx.ConnectError, httpx.TimeoutException) as e:
-            raise SeerrConnectionError(f"Cannot reach Seerr: {e}") from e
+            raise SeerrConnectionError(f"Connection failed: {e}") from e
         resp.raise_for_status()
         cookie = resp.cookies.get("connect.sid")
         if cookie:
@@ -73,11 +73,15 @@ class SeerrClient:
             raise SeerrAuthError("No session cookie returned from Seerr auth")
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Make an authenticated request, re-auth on 401.
+        """Make an authenticated request, re-auth on 401 or missing session.
 
         Uses %20 encoding for query params instead of httpx's default +.
         Seerr 3.x rejects + as space encoding.
         """
+        # Authenticate lazily if we never got a session cookie
+        if not self._cookie:
+            await self.authenticate()
+
         # Build URL with %20 encoding for params
         url = f"{self.base_url}{path}"
         params = kwargs.pop("params", None)
@@ -87,11 +91,15 @@ class SeerrClient:
 
         try:
             resp = await self.client.request(method, url, **kwargs)
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
-            raise SeerrConnectionError(f"Cannot reach Seerr: {e}") from e
+        except httpx.ConnectError as e:
+            log.error("Connection failed: %s %s — %s", method, path, e)
+            raise SeerrConnectionError(f"Connect failed ({method} {path}): {e}") from e
+        except httpx.TimeoutException as e:
+            log.error("Request timeout: %s %s after %ss — %s", method, path, self.client.timeout.connect, e)
+            raise SeerrConnectionError(f"Timeout ({method} {path}): {e}") from e
 
         if resp.status_code == 401:
-            log.warning("Seerr session expired, re-authenticating")
+            log.warning("401 on %s %s (has_cookie=%s), re-authenticating", method, path, bool(self._cookie))
             try:
                 await self.authenticate()
             except SeerrConnectionError:
@@ -100,9 +108,15 @@ class SeerrClient:
                 raise SeerrAuthError(f"Re-authentication failed: {e}") from e
             try:
                 resp = await self.client.request(method, url, **kwargs)
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                raise SeerrConnectionError(f"Cannot reach Seerr: {e}") from e
+            except httpx.ConnectError as e:
+                log.error("Seerr connect failed after re-auth: %s %s — %s", method, path, e)
+                raise SeerrConnectionError(f"Connect failed after re-auth ({method} {path}): {e}") from e
+            except httpx.TimeoutException as e:
+                log.error("Seerr timeout after re-auth: %s %s — %s", method, path, e)
+                raise SeerrConnectionError(f"Timeout after re-auth ({method} {path}): {e}") from e
 
+        if resp.status_code >= 400 and resp.status_code != 404:
+            log.error("HTTP %d on %s %s: %s", resp.status_code, method, path, resp.text[:200])
         resp.raise_for_status()
         return resp
 
@@ -292,10 +306,30 @@ class SeerrClient:
         """Request a movie or TV show on Seerr."""
         log.info("Seerr request: %s tmdb:%d", media_type, tmdb_id)
         payload: dict[str, Any] = {"mediaType": media_type, "mediaId": tmdb_id}
+        if media_type == "tv":
+            # Explicitly pass season numbers — omitting seasons crashes some shows
+            seasons = await self._get_season_numbers(tmdb_id)
+            if not seasons:
+                raise SeerrError(f"Could not fetch season info for tv/{tmdb_id}")
+            payload["seasons"] = seasons
         resp = await self._request("POST", "/api/v1/request", json=payload)
         result = resp.json()
         log.info("Seerr request successful: %s", result.get("id"))
         return result
+
+    async def _get_season_numbers(self, tmdb_id: int) -> list[int]:
+        """Fetch season numbers for a TV show, excluding specials (season 0)."""
+        try:
+            resp = await self._request("GET", f"/api/v1/tv/{tmdb_id}")
+            data = resp.json()
+            return [
+                s["seasonNumber"]
+                for s in data.get("seasons", [])
+                if s.get("seasonNumber", 0) > 0
+            ]
+        except Exception as e:
+            log.warning("Failed to fetch seasons for tv/%d: %s", tmdb_id, e)
+            return []
 
     async def get_media_status(self, media_type: str, tmdb_id: int) -> dict | None:
         """Get current status of a media item. Returns detail dict or None."""
@@ -342,10 +376,12 @@ class SeerrClient:
 
         Returns dict with keys: rt, rt_audience, rt_freshness, rt_audience_rating,
         imdb, imdb_votes. Values are formatted strings or None if unavailable.
+        Movies use /ratingscombined (RT + IMDB), TV uses /ratings (RT only).
         """
         try:
+            endpoint = "ratingscombined" if media_type == "movie" else "ratings"
             resp = await self._request(
-                "GET", f"/api/v1/{media_type}/{tmdb_id}/ratingscombined"
+                "GET", f"/api/v1/{media_type}/{tmdb_id}/{endpoint}"
             )
             data = resp.json()
             log.debug("Raw ratings for %s/%d: %s", media_type, tmdb_id, data)

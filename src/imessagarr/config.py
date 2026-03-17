@@ -40,6 +40,7 @@ class Settings:
     poster_dir: str = "~/Pictures/imessagarr"
     db_path: str = "~/.local/share/imessagarr/bot.db"
     chat_db_path: str = "~/Library/Messages/chat.db"
+    log_path: str = "imessagarr.log"
 
     # Messages
     max_message_length: int = 1200
@@ -128,6 +129,7 @@ def load_settings(
         poster_dir=paths.get("poster_dir", "~/Pictures/imessagarr"),
         db_path=paths.get("db_path", "~/.local/share/imessagarr/bot.db"),
         chat_db_path=paths.get("chat_db_path", "~/Library/Messages/chat.db"),
+        log_path=paths.get("log_path", "imessagarr.log"),
         max_message_length=messages.get("max_length", 1200),
         history_window=messages.get("history_window", 20),
         history_gap_hours=messages.get("history_gap_hours", 1.0),

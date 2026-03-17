@@ -52,7 +52,7 @@ async def get_weather(settings: Settings, client: httpx.AsyncClient) -> str | No
                 "current": "temperature_2m,apparent_temperature,weather_code",
                 "daily": "temperature_2m_max,temperature_2m_min,weather_code",
                 "timezone": settings.timezone,
-                "forecast_days": 2,
+                "forecast_days": 3,
             },
         )
         resp.raise_for_status()
@@ -60,20 +60,20 @@ async def get_weather(settings: Settings, client: httpx.AsyncClient) -> str | No
 
         current = data.get("current", {})
         daily = data.get("daily", {})
+        dates = daily.get("time", [])
+        highs = daily.get("temperature_2m_max", [])
+        lows = daily.get("temperature_2m_min", [])
+        codes = daily.get("weather_code", [])
 
+        location = settings.location_name
+        result_parts = []
+
+        # Today (with current conditions)
         temp = current.get("temperature_2m")
         feels = current.get("apparent_temperature")
         code = current.get("weather_code", 0)
         condition = WEATHER_CODES.get(code, "")
 
-        hi = daily.get("temperature_2m_max", [None])[0]
-        lo = daily.get("temperature_2m_min", [None])[0]
-        daily_code = daily.get("weather_code", [0])[0]
-        daily_condition = WEATHER_CODES.get(daily_code, "")
-
-        location = settings.location_name
-
-        # Today
         today_parts = []
         if temp is not None:
             s = f"{temp:.0f}°C"
@@ -82,28 +82,28 @@ async def get_weather(settings: Settings, client: httpx.AsyncClient) -> str | No
             today_parts.append(s)
         if condition:
             today_parts.append(condition)
-        if daily_condition and daily_condition != condition:
-            today_parts.append(f"{daily_condition} later")
-        if hi is not None and lo is not None:
-            today_parts.append(f"high {hi:.0f}°C low {lo:.0f}°C")
-
-        result_parts = []
+        if codes:
+            daily_condition = WEATHER_CODES.get(codes[0], "")
+            if daily_condition and daily_condition != condition:
+                today_parts.append(f"{daily_condition} later")
+        if highs and lows:
+            today_parts.append(f"high {highs[0]:.0f}°C low {lows[0]:.0f}°C")
         if today_parts:
             result_parts.append(f"{location} today: " + ", ".join(today_parts) + ".")
 
-        # Tomorrow (if available)
-        tomorrow_hi = daily.get("temperature_2m_max", [None, None])
-        tomorrow_lo = daily.get("temperature_2m_min", [None, None])
-        tomorrow_code = daily.get("weather_code", [0, 0])
-        if len(tomorrow_hi) > 1 and tomorrow_hi[1] is not None:
-            tmrw_parts = []
-            tmrw_condition = WEATHER_CODES.get(tomorrow_code[1], "")
-            if tmrw_condition:
-                tmrw_parts.append(tmrw_condition)
-            if tomorrow_hi[1] is not None and tomorrow_lo[1] is not None:
-                tmrw_parts.append(f"high {tomorrow_hi[1]:.0f}°C low {tomorrow_lo[1]:.0f}°C")
-            if tmrw_parts:
-                result_parts.append("Tomorrow: " + ", ".join(tmrw_parts) + ".")
+        # Tomorrow and day after
+        day_labels = ["Tomorrow", "Day after tomorrow"]
+        for i in range(1, min(len(dates), 3)):
+            day_parts = []
+            if i < len(codes):
+                cond = WEATHER_CODES.get(codes[i], "")
+                if cond:
+                    day_parts.append(cond)
+            if i < len(highs) and i < len(lows):
+                day_parts.append(f"high {highs[i]:.0f}°C low {lows[i]:.0f}°C")
+            if day_parts:
+                label = day_labels[i - 1] if i - 1 < len(day_labels) else dates[i]
+                result_parts.append(f"{label}: " + ", ".join(day_parts) + ".")
 
         return "\n".join(result_parts) if result_parts else None
 
@@ -112,8 +112,14 @@ async def get_weather(settings: Settings, client: httpx.AsyncClient) -> str | No
         return None
 
 
-async def get_pollen(settings: Settings, client: httpx.AsyncClient) -> str | None:
-    """Fetch pollen data from pollen.mydoglog.ca."""
+async def get_pollen(
+    settings: Settings, client: httpx.AsyncClient, *, pollen_specific: bool = False
+) -> str | None:
+    """Fetch pollen data from pollen.mydoglog.ca.
+
+    When pollen_specific is False (generic weather query), returns None for
+    out-of-season or zero pollen to avoid noise.
+    """
     try:
         resp = await client.get(
             "https://pollen.mydoglog.ca/api/nearest",
@@ -133,12 +139,12 @@ async def get_pollen(settings: Settings, client: httpx.AsyncClient) -> str | Non
         reading = readings[0]
 
         if reading.get("out_of_season"):
-            return None
+            return "Pollen: out of season right now." if pollen_specific else None
 
         level = reading.get("pollen_level", 0)
         level_name = POLLEN_LEVELS.get(level, "Unknown")
         if level == 0:
-            return None
+            return "Pollen: none right now." if pollen_specific else None
 
         parts = [f"Pollen: {level_name}"]
 

@@ -91,15 +91,18 @@ uv run -m imessagarr            # Daemon (production)
 
 ### Auto-start (launchd)
 ```bash
-swiftc -o iMessagarr wrapper.swift
-
-# System Settings → Privacy & Security:
-#   Full Disk Access → add ./iMessagarr
-#   Accessibility → add ./iMessagarr
+swiftc -o iMessagarr.app/Contents/MacOS/iMessagarr wrapper.swift
+codesign --force --sign - iMessagarr.app
 
 cp com.imessagarr.daemon.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.imessagarr.daemon.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist
 ```
+
+**Permissions** — both must be added manually (no automatic prompts):
+1. System Settings → Privacy & Security → **Full Disk Access** → `+` → select `iMessagarr.app` (required for reading chat.db)
+2. System Settings → Privacy & Security → **Accessibility** → `+` → select `iMessagarr.app` (required for typing indicators)
+
+After recompiling, remove and re-add `iMessagarr.app` in both lists (the code signature changes).
 
 ## Project Structure
 
@@ -110,7 +113,8 @@ imessagarr/
   personality.md          # Bot tone (→ LLM system prompt)
   instructions.md         # Action routing (→ LLM system prompt)
   memory.md               # Global bot context (→ LLM system prompt)
-  wrapper.swift           # Swift wrapper for macOS permission naming
+  wrapper.swift           # Swift wrapper (compiled into iMessagarr.app bundle)
+  iMessagarr.app/         # macOS app bundle (binary gitignored, Info.plist tracked)
   src/imessagarr/
     __main__.py           # Entry point, daemon loop
     config.py             # Settings from .env + config.toml

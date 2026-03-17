@@ -8,7 +8,7 @@ interval = 0.5
 debounce_delay = 0.3
 
 [digest]
-time = "07:30"
+time = "09:30"
 
 [location]
 # St. Catharines for weather; pollen API hits nearest station (Hamilton)
@@ -21,6 +21,7 @@ timezone = "America/Toronto"
 poster_dir = "~/Pictures/imessagarr"
 db_path = "~/.local/share/imessagarr/bot.db"
 chat_db_path = "~/Library/Messages/chat.db"
+log_path = "imessagarr.log"
 
 [messages]
 max_length = 1200

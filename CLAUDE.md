@@ -11,6 +11,7 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **Poster images must be in `~/Pictures/imessagarr/`** -- Messages.app sandbox, other dirs silently fail
 - **Secrets in `.env` only** -- never hardcode credentials or phone numbers
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
+- **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
 
 ## Commands
 
@@ -19,7 +20,15 @@ uv sync                              # Install deps
 uv run -m imessagarr --cli           # CLI test mode
 uv run -m imessagarr --digest        # One-shot digest
 uv run -m imessagarr                 # Run daemon
-swiftc -o iMessagarr wrapper.swift   # Build macOS wrapper
+
+# Restart daemon (for Python code changes — NO rebuild needed)
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist   # Stop
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist # Start
+
+# Rebuild wrapper (ONLY if wrapper.swift or Info.plist change — rare)
+# WARNING: rebuilding revokes FDA/Accessibility, must re-grant in System Settings
+swiftc -o iMessagarr.app/Contents/MacOS/iMessagarr wrapper.swift  # Build macOS wrapper
+codesign --force --sign - iMessagarr.app                          # Ad-hoc sign
 ```
 
 ## Key References
@@ -29,13 +38,15 @@ swiftc -o iMessagarr wrapper.swift   # Build macOS wrapper
 - docs/ref-seerr-api.md -- Seerr API reference (enums, endpoints, params)
 - config.toml -- Non-secret settings
 
-## Architecture: One LLM Call Per Message
+## Architecture: Two-Call Pattern
 
-Haiku decides the action (structured JSON), Python executes and formats everything. No second LLM call anywhere.
+Haiku decides the action (call 1), Python executes the API call, then Haiku crafts the response using conversation history + API results as context (call 2). Python only formats responses as a fallback if the second LLM call fails.
 
 ```
-User text → Haiku → {"action": "search", "query": "severance"} → Python executes → Python formats → send
+User text → Haiku (action) → Python executes API → store results as context → Haiku (response) → send
 ```
+
+Only exceptions: bypass commands (status/help/new) and remember/forget use Python responses directly.
 
 ## File Layout
 

@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/imessagarr/iMessagarr</string>
+        <string>/path/to/imessagarr/iMessagarr.app/Contents/MacOS/iMessagarr</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -21,6 +21,12 @@
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
 
     <key>StandardOutPath</key>
     <string>/path/to/imessagarr/imessagarr.log</string>

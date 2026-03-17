@@ -13,8 +13,6 @@ from .llm import LLMClient
 from .posters import PosterHandler
 from .seerr import (
     SeerrClient,
-    SeerrAuthError,
-    SeerrConnectionError,
     SeerrError,
     SeerrSearchError,
 )
@@ -110,16 +108,6 @@ class ActionExecutor:
         if bypass is not None:
             await self.db.add_history(sender_phone, "user", text)
             response = await self._handle_bypass(bypass, sender_phone)
-            await self.db.add_history(sender_phone, "assistant", response)
-            return response
-
-        # Force weather action for weather/pollen keywords
-        lower = text.strip().lower()
-        weather_keywords = ("weather", "pollen", "allerg", "forecast", "temperature", "outside")
-        if any(kw in lower for kw in weather_keywords):
-            await self.db.add_history(sender_phone, "user", text)
-            forced = LLMDecision(action=Action.WEATHER, message="")
-            response = await self._execute(forced, sender_phone)
             await self.db.add_history(sender_phone, "assistant", response)
             return response
 
@@ -219,13 +207,9 @@ class ActionExecutor:
                         lines.append(f"- {item['title']}")
 
                 return "\n".join(lines) if lines else "No pending or in-progress requests."
-            except SeerrConnectionError:
-                return "Can't reach the media server right now."
-            except SeerrAuthError:
-                return "Auth issue with the media server, try again in a minute."
             except Exception as e:
-                log.error("Failed to fetch requests: %s", e)
-                return "Something went wrong checking status."
+                log.error("Status check failed: %s", e)
+                return "Something went wrong, try again in a sec."
 
         if command == "new":
             if sender_phone:
@@ -246,6 +230,32 @@ class ActionExecutor:
             )
 
         return "Unknown command."
+
+    async def _llm_respond(self, sender_phone: str, fallback: str = "") -> str:
+        """Build prompt with current history and let the LLM generate a response.
+
+        Called after storing API data as context — the LLM sees the data
+        in conversation history and crafts a contextual response.
+        """
+        prompt = await self._build_prompt(sender_phone)
+        try:
+            decision, meta = await self.llm.decide(prompt)
+            log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
+            # Allow request as a follow-up (user confirms a search result)
+            if decision.action == Action.REQUEST and decision.tmdb_id:
+                return await self._handle_request(decision, sender_phone)
+            # Only accept reply — any other action means the LLM is confused
+            # (e.g., returning "recommend" with filler instead of describing results)
+            if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
+                return decision.message
+            log.warning(
+                "LLM response returned action=%s message=%r instead of reply, using fallback",
+                decision.action.value, (decision.message or "")[:100],
+            )
+            return fallback or "Something went wrong, try again in a sec."
+        except Exception as e:
+            log.error("LLM response call failed: %s", e)
+            return fallback or "Something went wrong, try again in a sec."
 
     async def _build_prompt(self, sender_phone: str) -> str:
         """Build the full prompt from conversation history."""
@@ -280,9 +290,9 @@ class ActionExecutor:
         if decision.action == Action.SEARCH:
             return await self._handle_search(decision, sender_phone)
         elif decision.action == Action.REQUEST:
-            return await self._handle_request(decision)
+            return await self._handle_request(decision, sender_phone)
         elif decision.action == Action.CHECK_STATUS:
-            return await self._handle_bypass("status", sender_phone)
+            return await self._handle_check_status(decision, sender_phone)
         elif decision.action == Action.WEATHER:
             return await self._handle_weather(decision, sender_phone)
         elif decision.action == Action.RECENT:
@@ -303,15 +313,11 @@ class ActionExecutor:
         query = decision.query or decision.message
         try:
             results = await self.seerr.search(query)
-        except SeerrConnectionError:
-            return "Can't reach the media server right now."
-        except SeerrAuthError:
-            return "Auth issue with the media server, try again in a minute."
         except SeerrSearchError:
             return f"Couldn't find anything for \"{query}\"."
         except Exception as e:
-            log.error("Seerr search failed: %s", e)
-            return "Something went wrong with the search."
+            log.error("Search failed for '%s': %s", query, e)
+            return "Something went wrong, try again in a sec."
 
         if not results:
             await self.db.add_history(sender_phone, "context", "[No results found]")
@@ -337,33 +343,69 @@ class ActionExecutor:
             if rating_dict and i < len(results):
                 self._apply_ratings(results[i], rating_dict)
 
-        # Send poster — only collage for disambiguation (add/request intent),
-        # otherwise just the top result's poster
+        # Fetch history once for poster logic and narrowing
+        history = await self.db.get_history(sender_phone) if (self.sender and self.posters) or len(results) > 1 else []
+
+        # If multiple results but one matches a recently discussed title, narrow to it
+        if len(results) > 1:
+            recent_tmdb_ids: set[int] = set()
+            for entry in reversed(history):
+                if entry.role == "context":
+                    for r in results:
+                        if f"tmdb:{r.tmdb_id}" in entry.content:
+                            recent_tmdb_ids.add(r.tmdb_id)
+                # Only look back through recent exchanges
+                if entry.role == "user" and len(recent_tmdb_ids) > 0:
+                    break
+            if recent_tmdb_ids:
+                matched = [r for r in results if r.tmdb_id in recent_tmdb_ids]
+                if len(matched) == 1:
+                    results = matched
+
+        # Send poster — collage for add/request disambiguation,
+        # single poster for info queries, skip for status checks
         if self.sender and self.posters:
-            history = await self.db.get_history(sender_phone)
             last_user_msg = ""
             for entry in reversed(history):
                 if entry.role == "user":
                     last_user_msg = entry.content.lower()
                     break
             adding = any(w in last_user_msg for w in ("add", "request", "get", "download"))
+            checking_status = any(w in last_user_msg for w in (
+                "status", "done", "ready", "downloading", "is it",
+                "update", "progress", "where is", "how is",
+            ))
+            # Check if top result was already shown in recent context
+            already_shown = False
+            for entry in reversed(history):
+                if entry.role == "context" and results and f"tmdb:{results[0].tmdb_id}" in entry.content:
+                    already_shown = True
+                    break
+                if entry.role == "user":
+                    break  # Only check context from current exchange
             if adding and len(results) > 1:
                 # Filter to results with posters so collage indices match text list
                 results_with_posters = [r for r in results if r.poster_path]
                 if results_with_posters:
                     results = results_with_posters
                 await self._send_posters(sender_phone, results)
-            elif results:
+            elif not checking_status and not already_shown and results:
                 await self._send_single_poster(sender_phone, results[0])
 
-        # Store results as context for future LLM calls (e.g. user confirms)
+        # Store results as context, then let the LLM craft the response.
+        # The LLM sees search results + conversation history and can:
+        # - Describe a single result naturally based on what the user asked
+        # - Disambiguate multiple results using prior context
+        # - Offer to request, check status, etc. as appropriate
         context = format_search_results(results)
         await self.db.add_history(sender_phone, "context", context)
 
-        # Format results directly in Python — no second LLM call needed
-        if len(results) == 1:
-            return self._format_single_result(results[0])
-        return self._format_multiple_results(results)
+        fallback = (
+            self._format_single_result(results[0])
+            if len(results) == 1
+            else self._format_multiple_results(results)
+        )
+        return await self._llm_respond(sender_phone, fallback=fallback)
 
     async def _send_single_poster(
         self, phone: str, result: SearchResult
@@ -552,11 +594,19 @@ class ActionExecutor:
 
     async def _handle_weather(self, decision: LLMDecision, sender_phone: str) -> str:
         """Fetch weather/pollen data and format directly."""
+        # Check if user specifically asked about pollen/allergies
+        history = await self.db.get_history(sender_phone)
+        last_user_msg = ""
+        for entry in reversed(history):
+            if entry.role == "user":
+                last_user_msg = entry.content.lower()
+                break
+        pollen_specific = any(kw in last_user_msg for kw in ("pollen", "allerg"))
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 weather, pollen = await asyncio.gather(
                     get_weather(self.settings, client),
-                    get_pollen(self.settings, client),
+                    get_pollen(self.settings, client, pollen_specific=pollen_specific),
                 )
         except Exception as e:
             log.error("Weather fetch failed: %s", e)
@@ -571,12 +621,79 @@ class ActionExecutor:
         if pollen:
             parts.append(pollen)
 
-        result = "\n".join(parts)
-        await self.db.add_history(sender_phone, "context", f"[{result}]")
-        return result
+        data = "\n".join(parts)
+        await self.db.add_history(sender_phone, "context", f"[Weather data: {data}]")
+        return await self._llm_respond(sender_phone, fallback=data)
+
+    async def _handle_check_status(self, decision: LLMDecision, sender_phone: str) -> str:
+        """Check pending/processing requests, store as context, let LLM respond."""
+        try:
+            counts = await self.seerr.get_request_count()
+            has_activity = (
+                counts.get("pending", 0)
+                or counts.get("processing", 0)
+                or counts.get("available", 0)
+            )
+
+            if not has_activity:
+                return "No pending or in-progress requests."
+
+            tasks = []
+            fetch_processing = counts.get("processing", 0) > 0
+            fetch_pending = counts.get("pending", 0) > 0
+
+            if fetch_processing:
+                tasks.append(self.seerr.get_processing())
+            if fetch_pending:
+                tasks.append(self.seerr.get_pending())
+            tasks.append(self.seerr.get_recently_added(take=3))
+
+            results = await asyncio.gather(*tasks)
+            idx = 0
+
+            processing = results[idx] if fetch_processing else []
+            if fetch_processing:
+                idx += 1
+            pending = results[idx] if fetch_pending else []
+            if fetch_pending:
+                idx += 1
+            recently_added = results[idx]
+
+            # Resolve titles concurrently
+            all_reqs = list(processing[:5]) + list(pending[:5])
+            if all_reqs:
+                titles = await asyncio.gather(
+                    *[_resolve_request_title(req, self.seerr) for req in all_reqs]
+                )
+            else:
+                titles = []
+            proc_count = min(len(processing), 5)
+
+            lines: list[str] = []
+            if processing:
+                proc_titles = [t for t in titles[:proc_count] if t != "Unknown"]
+                if proc_titles:
+                    lines.append("Downloading: " + ", ".join(proc_titles))
+            if pending:
+                pend_titles = [t for t in titles[proc_count:] if t != "Unknown"]
+                if pend_titles:
+                    lines.append("Waiting for approval: " + ", ".join(pend_titles))
+            if recently_added:
+                added_titles = [item["title"] for item in recently_added[:3]]
+                lines.append("Recently added: " + ", ".join(added_titles))
+
+            if not lines:
+                return "No pending or in-progress requests."
+
+            data = "\n".join(lines)
+            await self.db.add_history(sender_phone, "context", f"[Request status: {data}]")
+            return await self._llm_respond(sender_phone, fallback=data)
+        except Exception as e:
+            log.error("Status check failed: %s", e)
+            return "Something went wrong, try again in a sec."
 
     async def _handle_recent(self, decision: LLMDecision, sender_phone: str) -> str:
-        """Check recently added media and pending requests, format directly."""
+        """Check recently added media and pending requests."""
         try:
             lines: list[str] = []
             # Recently added to library
@@ -585,13 +702,9 @@ class ActionExecutor:
                 movies = [r["title"] for r in added if r["mediaType"] == "movie"]
                 shows = [r["title"] for r in added if r["mediaType"] == "tv"]
                 if movies:
-                    lines.append("Recently added movies:")
-                    for title in movies:
-                        lines.append(f"- {title}")
+                    lines.append("Recently added movies: " + ", ".join(movies))
                 if shows:
-                    lines.append("Recently added shows:")
-                    for title in shows:
-                        lines.append(f"- {title}")
+                    lines.append("Recently added shows: " + ", ".join(shows))
             # Pending requests
             pending = await self.seerr.get_pending()
             if pending:
@@ -600,23 +713,17 @@ class ActionExecutor:
                 )
                 pending_titles = [t for t in resolved if t != "Unknown"]
                 if pending_titles:
-                    lines.append("Pending requests:")
-                    for title in pending_titles:
-                        lines.append(f"- {title}")
+                    lines.append("Pending requests: " + ", ".join(pending_titles))
 
             if not lines:
                 return "Nothing new right now."
 
-            result = "\n".join(lines)
-            await self.db.add_history(sender_phone, "context", f"[{result}]")
-            return result
-        except SeerrConnectionError:
-            return "Can't reach the media server right now."
-        except SeerrAuthError:
-            return "Auth issue with the media server, try again in a minute."
+            data = "\n".join(lines)
+            await self.db.add_history(sender_phone, "context", f"[{data}]")
+            return await self._llm_respond(sender_phone, fallback=data)
         except Exception as e:
             log.error("Recent media fetch failed: %s", e)
-            return "Something went wrong checking recent media."
+            return "Something went wrong, try again in a sec."
 
     async def _handle_recommend(self, decision: LLMDecision, sender_phone: str) -> str:
         """Discover movies/shows by genre, year, trending, or similar to a title."""
@@ -678,12 +785,18 @@ class ActionExecutor:
                         else:
                             await self._send_single_poster(sender_phone, results[0])
 
-                    # Store results as context for future LLM calls
+                    # Store context and let LLM craft the response
+                    await self.db.add_history(
+                        sender_phone, "context",
+                        f"[Recommendations similar to {base.title}]",
+                    )
                     context = format_search_results(results)
                     await self.db.add_history(sender_phone, "context", context)
 
-                    # Format directly — no second LLM call needed
-                    return self._format_recommendations(results, similar_to=base.title)
+                    return await self._llm_respond(
+                        sender_phone,
+                        fallback=self._format_recommendations(results, similar_to=base.title),
+                    )
 
             # Fall through to genre/trending logic if search or recommendations failed
 
@@ -736,13 +849,9 @@ class ActionExecutor:
             else:  # want_tv
                 genre_id = tv_genres.get(genre_keyword) if genre_keyword else None
                 results = await self.seerr.discover_tv(genre_id=genre_id, year=year, take=3)
-        except SeerrConnectionError:
-            return "Can't reach the media server right now."
-        except SeerrAuthError:
-            return "Auth issue with the media server, try again in a minute."
         except Exception as e:
             log.error("Discover failed: %s", e)
-            return "Couldn't get recommendations right now, try again in a bit."
+            return "Something went wrong, try again in a sec."
 
         if not results:
             return "Couldn't find any recommendations for that."
@@ -778,12 +887,14 @@ class ActionExecutor:
             else:
                 await self._send_single_poster(sender_phone, results[0])
 
-        # Store results as context for future LLM calls
+        # Store context and let LLM craft the response
         context = format_search_results(results)
         await self.db.add_history(sender_phone, "context", context)
 
-        # Format directly — no second LLM call needed
-        return self._format_recommendations(results)
+        return await self._llm_respond(
+            sender_phone,
+            fallback=self._format_recommendations(results),
+        )
 
     async def _handle_remember(self, decision: LLMDecision, sender_phone: str) -> str:
         """Store a user fact/preference."""
@@ -803,15 +914,17 @@ class ActionExecutor:
             return decision.message or "Done, forgot it."
         return decision.message or "I don't have anything like that saved."
 
-    async def _handle_request(self, decision: LLMDecision) -> str:
+    async def _handle_request(self, decision: LLMDecision, sender_phone: str) -> str:
         """Execute a request action: add media to Seerr with dedup check."""
         if not decision.tmdb_id or not decision.media_type:
             return "I need to know which title to request. Can you search first?"
 
         # Check if already requested/available before making a duplicate request
+        title = "this"
         try:
             detail = await self.seerr.get_media_status(decision.media_type, decision.tmdb_id)
             if detail:
+                title = detail.get("title") or detail.get("name", "this")
                 media_info = detail.get("mediaInfo")
                 if media_info:
                     raw_status = media_info.get("status", 0)
@@ -820,23 +933,29 @@ class ActionExecutor:
                     except ValueError:
                         status = MediaStatus.UNKNOWN
 
-                    title = detail.get("title") or detail.get("name", "this")
                     if status == MediaStatus.AVAILABLE:
+                        await self._store_request_context(sender_phone, title, decision)
                         return f"{title} is already in your library."
                     elif status == MediaStatus.PROCESSING:
+                        await self._store_request_context(sender_phone, title, decision)
                         return f"{title} is already requested and on its way."
                     elif status == MediaStatus.PENDING:
+                        await self._store_request_context(sender_phone, title, decision)
                         return f"{title} is already requested, waiting on approval."
         except Exception as e:
             log.debug("Pre-request status check failed (proceeding anyway): %s", e)
 
         try:
             await self.seerr.request_media(decision.media_type, decision.tmdb_id)
+            await self._store_request_context(sender_phone, title, decision)
             return decision.message
-        except SeerrConnectionError:
-            return "Can't reach the media server right now."
-        except SeerrAuthError:
-            return "Auth issue with the media server, try again in a minute."
         except Exception as e:
-            log.error("Seerr request failed: %s", e)
-            return "Couldn't make that request right now, try again in a bit."
+            log.error("Request failed (type=%s tmdb=%s): %s", decision.media_type, decision.tmdb_id, e)
+            return "Something went wrong, try again in a sec."
+
+    async def _store_request_context(
+        self, sender_phone: str, title: str, decision: LLMDecision
+    ) -> None:
+        """Store context about the requested/discussed title for future narrowing."""
+        ctx = f"[Last discussed: {title} tmdb:{decision.tmdb_id} {decision.media_type}]"
+        await self.db.add_history(sender_phone, "context", ctx)

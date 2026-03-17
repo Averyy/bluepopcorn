@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import signal
 import sys
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .actions import ActionExecutor
@@ -24,7 +25,7 @@ from .webhooks import WebhookServer
 log = logging.getLogger("imessagarr")
 
 
-def setup_logging(level: str) -> None:
+def setup_logging(level: str, log_path: str = "imessagarr.log") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     # Clear any existing handlers to avoid duplicates
@@ -39,8 +40,10 @@ def setup_logging(level: str) -> None:
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(fmt)
         root.addHandler(stdout_handler)
+    log_file = Path(log_path)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
-        "imessagarr.log", maxBytes=5_000_000, backupCount=3
+        log_file, maxBytes=5_000_000, backupCount=3
     )
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
@@ -84,11 +87,18 @@ async def run_daemon(settings: Settings) -> None:
 
     await db.init()
 
-    try:
-        await seerr.authenticate()
-    except Exception as e:
-        log.error("Seerr auth failed: %s", e)
-        log.warning("Starting without Seerr — search/request won't work")
+    for attempt in range(1, 13):  # retry up to ~2 minutes
+        try:
+            await seerr.authenticate()
+            break
+        except Exception as e:
+            if attempt == 12:
+                log.error("Seerr auth failed after 12 attempts: %s", e)
+                log.warning("Starting without Seerr — search/request won't work")
+            else:
+                delay = min(attempt * 5, 15)
+                log.warning("Seerr auth attempt %d failed: %s — retrying in %ds", attempt, e, delay)
+                await asyncio.sleep(delay)
 
     # Ensure poster dir exists
     settings.resolve_path(settings.poster_dir).mkdir(parents=True, exist_ok=True)
@@ -154,13 +164,20 @@ async def run_daemon(settings: Settings) -> None:
 
     log.info("Daemon running. Polling every %.1fs.", settings.poll_interval)
 
+    consecutive_errors = 0
+
     try:
         while not shutdown.is_set():
             try:
                 messages = await monitor.get_new_messages(last_rowid)
+                consecutive_errors = 0  # Reset on success
             except Exception as e:
-                log.error("Monitor error: %s", e)
-                await asyncio.sleep(settings.poll_interval)
+                consecutive_errors += 1
+                # Exponential backoff: 0.5s, 1s, 2s, 4s, ... capped at 30s
+                backoff = min(settings.poll_interval * (2 ** (consecutive_errors - 1)), 30)
+                if consecutive_errors <= 3 or consecutive_errors % 20 == 0:
+                    log.error("Monitor error (attempt %d, next retry in %.0fs): %s", consecutive_errors, backoff, e)
+                await asyncio.sleep(backoff)
                 continue
 
             # Advance cursor for all messages
@@ -281,9 +298,10 @@ async def _schedule_digest(
     """Schedule daily morning digest."""
     tz = ZoneInfo(settings.timezone)
 
+    hour, minute = map(int, settings.digest_time.split(":"))
+
     while True:
         now = datetime.datetime.now(tz)
-        hour, minute = map(int, settings.digest_time.split(":"))
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += datetime.timedelta(days=1)
@@ -303,6 +321,12 @@ async def _schedule_digest(
         except Exception as e:
             log.error("Digest failed: %s", e)
 
+        # Sleep past the target minute to prevent double-fire from sleep imprecision
+        now = datetime.datetime.now(tz)
+        seconds_left_in_minute = 60 - now.second
+        if seconds_left_in_minute < 60:
+            await asyncio.sleep(seconds_left_in_minute + 1)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="iMessagarr - iMessage Seerr bot")
@@ -311,7 +335,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings()
-    setup_logging(settings.log_level)
+    setup_logging(settings.log_level, str(settings.resolve_path(settings.log_path)))
 
     if args.cli:
         asyncio.run(cli_mode())

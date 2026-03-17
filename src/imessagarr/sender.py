@@ -33,7 +33,13 @@ class MessageSender:
             return False, "timeout"
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
-            log.error("AppleScript error: %s", error)
+            if "not allowed to send keystrokes" in error:
+                log.error(
+                    "Accessibility permission denied — remove and re-add iMessagarr.app "
+                    "in System Settings > Privacy & Security > Accessibility"
+                )
+            else:
+                log.error("AppleScript error: %s", error)
             return False, error
         return True, stdout.decode("utf-8", errors="ignore").strip()
 
@@ -99,8 +105,6 @@ end tell
         ok, err = await self._run_applescript(script)
         if ok:
             log.debug("Typing indicator started for %s", phone)
-        else:
-            log.debug("Typing indicator failed (non-critical): %s", err)
 
     async def stop_typing(self) -> None:
         """Clear the compose field to stop typing indicator.

@@ -74,6 +74,16 @@ class MessageMonitor:
 
     async def _get_db(self) -> aiosqlite.Connection:
         """Get or open a persistent read-only connection to chat.db."""
+        if self._db is not None:
+            try:
+                # Verify the connection is still usable
+                await self._db.execute("SELECT 1")
+            except Exception:
+                try:
+                    await self._db.close()
+                except Exception:
+                    pass
+                self._db = None
         if self._db is None:
             uri = f"file:{self.chat_db_path}?mode=ro"
             self._db = await aiosqlite.connect(uri, uri=True)
