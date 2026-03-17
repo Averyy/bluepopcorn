@@ -156,7 +156,7 @@ def format_single_result(r: SearchResult) -> str:
         if r.download_progress:
             parts.append(f"Currently downloading ({r.download_progress}).")
         else:
-            parts.append("Currently downloading.")
+            parts.append("Already requested, will download when available.")
     elif r.status == MediaStatus.PENDING:
         parts.append("Already requested, waiting on approval.")
     elif r.status == MediaStatus.BLOCKLISTED:

@@ -84,7 +84,7 @@ class SearchResult:
         labels = {
             MediaStatus.AVAILABLE: "available",
             MediaStatus.PARTIALLY_AVAILABLE: "in your library",
-            MediaStatus.PROCESSING: "downloading",
+            MediaStatus.PROCESSING: "requested",
             MediaStatus.PENDING: "requested, pending approval",
             MediaStatus.UNKNOWN: "unknown",
             MediaStatus.NOT_TRACKED: "not requested",
