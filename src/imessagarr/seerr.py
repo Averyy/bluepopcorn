@@ -23,6 +23,31 @@ GENRE_SHORTHANDS: dict[str, list[str]] = {
 }
 
 
+def seerr_title(data: dict, default: str = "Unknown") -> str:
+    """Extract title from a Seerr detail/media dict (movies use 'title', TV uses 'name')."""
+    return data.get("title") or data.get("name") or default
+
+
+def parse_download_progress(media_info: dict) -> str | None:
+    """Extract download progress string from a Seerr mediaInfo dict.
+
+    Returns e.g. "51%, ETA 00:01:23" or "51%" or None if no download data.
+    """
+    dl_status = media_info.get("downloadStatus") or []
+    if not dl_status or not isinstance(dl_status, list):
+        return None
+    dl = dl_status[0]
+    size = dl.get("size", 0)
+    size_left = dl.get("sizeLeft", dl.get("sizeleft", 0))
+    if not size or size <= 0:
+        return None
+    pct = round((size - size_left) / size * 100)
+    time_left = dl.get("timeleft") or dl.get("timeLeft") or ""
+    if time_left:
+        return f"{pct}%, ETA {time_left}"
+    return f"{pct}%"
+
+
 # --- Custom Exceptions ---
 
 
@@ -47,8 +72,9 @@ class SeerrClient:
         self.base_url = settings.seerr_url.rstrip("/")
         self.email = settings.seerr_email
         self.password = settings.seerr_password
-        self.client = httpx.AsyncClient(timeout=15)
+        self.client = httpx.AsyncClient(timeout=settings.http_timeout)
         self._cookie: str | None = None
+        self._auth_lock = asyncio.Lock()
         # Dynamic genre maps, loaded lazily
         self._genre_map_movie: dict[str, int] | None = None
         self._genre_map_tv: dict[str, int] | None = None
@@ -80,7 +106,9 @@ class SeerrClient:
         """
         # Authenticate lazily if we never got a session cookie
         if not self._cookie:
-            await self.authenticate()
+            async with self._auth_lock:
+                if not self._cookie:  # Double-check after acquiring lock
+                    await self.authenticate()
 
         # Build URL with %20 encoding for params
         url = f"{self.base_url}{path}"
@@ -100,12 +128,13 @@ class SeerrClient:
 
         if resp.status_code == 401:
             log.warning("401 on %s %s (has_cookie=%s), re-authenticating", method, path, bool(self._cookie))
-            try:
-                await self.authenticate()
-            except SeerrConnectionError:
-                raise
-            except Exception as e:
-                raise SeerrAuthError(f"Re-authentication failed: {e}") from e
+            async with self._auth_lock:
+                try:
+                    await self.authenticate()
+                except SeerrConnectionError:
+                    raise
+                except Exception as e:
+                    raise SeerrAuthError(f"Re-authentication failed: {e}") from e
             try:
                 resp = await self.client.request(method, url, **kwargs)
             except httpx.ConnectError as e:
@@ -119,19 +148,6 @@ class SeerrClient:
             log.error("HTTP %d on %s %s: %s", resp.status_code, method, path, resp.text[:200])
         resp.raise_for_status()
         return resp
-
-    async def health_check(self) -> dict | None:
-        """Check if Seerr is reachable (public endpoint, no auth).
-
-        Returns version info dict or None if unreachable.
-        """
-        try:
-            resp = await self.client.get(f"{self.base_url}/api/v1/status")
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception:
-            pass
-        return None
 
     # --- Genre Loading ---
 
@@ -226,8 +242,8 @@ class SeerrClient:
                 data2 = resp2.json()
                 extra = self._parse_results(data2.get("results", []), take=5 - len(results))
                 results.extend(extra)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Search page 2 fallback failed: %s", e)
 
         # Post-filter by media type and year if the user specified them
         if want_movie or want_tv or want_year:
@@ -464,7 +480,7 @@ class SeerrClient:
                     "GET", f"/api/v1/{media_type}/{tmdb_id}"
                 )
                 detail = detail_resp.json()
-                title = detail.get("title") or detail.get("name", "Unknown")
+                title = seerr_title(detail)
             except Exception:
                 title = item.get("externalServiceSlug", "Unknown").replace("-", " ").title()
             return {
@@ -483,6 +499,7 @@ class SeerrClient:
         *,
         filter_lang_year: bool = False,
         min_votes: int = 0,
+        exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Parse raw API result items into SearchResult objects.
 
@@ -497,6 +514,9 @@ class SeerrClient:
 
             media_type = item.get("mediaType", "")
             if media_type not in ("movie", "tv"):
+                continue
+
+            if exclude_ids and item.get("id") in exclude_ids:
                 continue
 
             release = item.get("releaseDate") or item.get("firstAirDate") or ""
@@ -520,7 +540,10 @@ class SeerrClient:
             except ValueError:
                 status = MediaStatus.UNKNOWN
 
-            title = item.get("title") or item.get("name", "Unknown")
+            # Extract download progress when actively downloading
+            download_progress = parse_download_progress(media_info) if status == MediaStatus.PROCESSING else None
+
+            title = seerr_title(item)
 
             vote_avg = item.get("voteAverage")
             rating = round(vote_avg, 1) if vote_avg else None
@@ -535,11 +558,12 @@ class SeerrClient:
                     status=status,
                     poster_path=item.get("posterPath"),
                     rating=rating,
+                    download_progress=download_progress,
                 )
             )
         return results
 
-    async def get_recommendations(self, media_type: str, tmdb_id: int, take: int = 3) -> list[SearchResult]:
+    async def get_recommendations(self, media_type: str, tmdb_id: int, take: int = 3, exclude_ids: set[int] | None = None) -> list[SearchResult]:
         """Get recommendations based on a specific movie or TV show."""
         log.info("Seerr recommendations: %s/%d", media_type, tmdb_id)
         resp = await self._request(
@@ -547,11 +571,11 @@ class SeerrClient:
             params={"language": "en"},
         )
         data = resp.json()
-        results = self._parse_results(data.get("results", []), take, filter_lang_year=True)
+        results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
         log.info("Seerr recommendations returned %d results", len(results))
         return results
 
-    async def get_similar(self, media_type: str, tmdb_id: int, take: int = 3) -> list[SearchResult]:
+    async def get_similar(self, media_type: str, tmdb_id: int, take: int = 3, exclude_ids: set[int] | None = None) -> list[SearchResult]:
         """Get similar titles for a specific movie or TV show (fallback for recommendations)."""
         log.info("Seerr similar: %s/%d", media_type, tmdb_id)
         resp = await self._request(
@@ -559,11 +583,11 @@ class SeerrClient:
             params={"language": "en"},
         )
         data = resp.json()
-        results = self._parse_results(data.get("results", []), take, filter_lang_year=True)
+        results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
         log.info("Seerr similar returned %d results", len(results))
         return results
 
-    async def discover_trending(self, take: int = 5) -> list[SearchResult]:
+    async def discover_trending(self, take: int = 5, exclude_ids: set[int] | None = None) -> list[SearchResult]:
         """Get trending movies and TV shows."""
         log.info("Seerr discover: trending")
         resp = await self._request(
@@ -571,12 +595,14 @@ class SeerrClient:
             params={"language": "en"},
         )
         data = resp.json()
-        results = self._parse_results(data.get("results", []), take, filter_lang_year=True)
+        results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
         log.info("Seerr trending returned %d results", len(results))
         return results
 
     async def discover_movies(
-        self, genre_id: int | None = None, year: int | None = None, take: int = 5
+        self, genre_id: int | None = None, year: int | None = None,
+        year_end: int | None = None, take: int = 5,
+        exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Discover movies by genre and/or year."""
         params: dict[str, Any] = {
@@ -588,31 +614,34 @@ class SeerrClient:
             params["genre"] = str(genre_id)
         if year is not None:
             params["primaryReleaseDateGte"] = f"{year}-01-01"
-            params["primaryReleaseDateLte"] = f"{year}-12-31"
+            end = year_end or year
+            params["primaryReleaseDateLte"] = f"{end}-12-31"
         log.info("Seerr discover movies: genre=%s year=%s", genre_id, year)
-        resp = await self._request("GET", "/api/v1/discover/movies", params=params)
-        data = resp.json()
-        results = self._parse_results(
-            data.get("results", []), take, filter_lang_year=True, min_votes=10,
-        )
-        # Page 2 fallback if too few results
-        if len(results) < take and data.get("totalPages", 1) > 1:
+        results: list[SearchResult] = []
+        for page in range(1, 6):
+            params["page"] = page
             try:
-                params["page"] = 2
-                resp2 = await self._request("GET", "/api/v1/discover/movies", params=params)
-                data2 = resp2.json()
-                extra = self._parse_results(
-                    data2.get("results", []), take - len(results),
-                    filter_lang_year=True, min_votes=10,
-                )
-                results.extend(extra)
-            except Exception:
-                pass
+                resp = await self._request("GET", "/api/v1/discover/movies", params=params)
+            except Exception as e:
+                if page == 1:
+                    raise
+                log.debug("Discover movies page %d failed: %s", page, e)
+                break
+            data = resp.json()
+            batch = self._parse_results(
+                data.get("results", []), take - len(results),
+                filter_lang_year=True, min_votes=10, exclude_ids=exclude_ids,
+            )
+            results.extend(batch)
+            if len(results) >= take or page >= data.get("totalPages", 1):
+                break
         log.info("Seerr discover movies returned %d results", len(results))
-        return results
+        return results[:take]
 
     async def discover_tv(
-        self, genre_id: int | None = None, year: int | None = None, take: int = 5
+        self, genre_id: int | None = None, year: int | None = None,
+        year_end: int | None = None, take: int = 5,
+        exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Discover TV shows by genre and/or year."""
         params: dict[str, Any] = {
@@ -624,28 +653,29 @@ class SeerrClient:
             params["genre"] = str(genre_id)
         if year is not None:
             params["firstAirDateGte"] = f"{year}-01-01"
-            params["firstAirDateLte"] = f"{year}-12-31"
+            end = year_end or year
+            params["firstAirDateLte"] = f"{end}-12-31"
         log.info("Seerr discover tv: genre=%s year=%s", genre_id, year)
-        resp = await self._request("GET", "/api/v1/discover/tv", params=params)
-        data = resp.json()
-        results = self._parse_results(
-            data.get("results", []), take, filter_lang_year=True, min_votes=10,
-        )
-        # Page 2 fallback if too few results
-        if len(results) < take and data.get("totalPages", 1) > 1:
+        results: list[SearchResult] = []
+        for page in range(1, 6):
+            params["page"] = page
             try:
-                params["page"] = 2
-                resp2 = await self._request("GET", "/api/v1/discover/tv", params=params)
-                data2 = resp2.json()
-                extra = self._parse_results(
-                    data2.get("results", []), take - len(results),
-                    filter_lang_year=True, min_votes=10,
-                )
-                results.extend(extra)
-            except Exception:
-                pass
+                resp = await self._request("GET", "/api/v1/discover/tv", params=params)
+            except Exception as e:
+                if page == 1:
+                    raise
+                log.debug("Discover tv page %d failed: %s", page, e)
+                break
+            data = resp.json()
+            batch = self._parse_results(
+                data.get("results", []), take - len(results),
+                filter_lang_year=True, min_votes=10, exclude_ids=exclude_ids,
+            )
+            results.extend(batch)
+            if len(results) >= take or page >= data.get("totalPages", 1):
+                break
         log.info("Seerr discover tv returned %d results", len(results))
-        return results
+        return results[:take]
 
     async def close(self) -> None:
         await self.client.aclose()

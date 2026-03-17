@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .actions import ActionExecutor
+from .actions import ActionExecutor, ERROR_GENERIC
 from .cli import cli_mode
 from .config import Settings, load_settings
 from .db import BotDatabase
@@ -20,6 +20,7 @@ from .monitor import MessageMonitor
 from .posters import PosterHandler
 from .seerr import SeerrClient
 from .sender import MessageSender
+from .types import IncomingMessage
 from .webhooks import WebhookServer
 
 log = logging.getLogger("imessagarr")
@@ -187,7 +188,7 @@ async def run_daemon(settings: Settings) -> None:
                     await db.set_last_rowid(last_rowid)
 
             # Group by sender, keep only the latest message per sender
-            latest_by_sender: dict[str, object] = {}
+            latest_by_sender: dict[str, IncomingMessage] = {}
             for msg in messages:
                 latest_by_sender[msg.sender] = msg
 
@@ -231,8 +232,8 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
             if newer_from_same:
                 log.debug("Skipping debounced message from %s", msg.sender)
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Debounce check failed: %s", e)
 
         try:
             log.info("IN  %s: %s", msg.sender, msg.text[:200])
@@ -247,7 +248,7 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
             await sender.stop_typing()
             try:
                 await sender.send_text(
-                    msg.sender, "Something went wrong, try again in a sec."
+                    msg.sender, ERROR_GENERIC
                 )
             except Exception:
                 log.error("Failed to send error message to %s", msg.sender)

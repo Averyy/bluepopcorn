@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class Action(str, enum.Enum):
@@ -77,20 +77,24 @@ class SearchResult:
     trailer_url: str | None = None  # YouTube trailer URL
     rt_rating: str | None = None  # Rotten Tomatoes score (e.g. "97%")
     imdb_rating: str | None = None  # IMDB score (e.g. "8.7")
+    download_progress: str | None = None  # e.g. "51%" when actively downloading
 
     @property
     def status_label(self) -> str:
         labels = {
             MediaStatus.AVAILABLE: "available",
-            MediaStatus.PARTIALLY_AVAILABLE: "partially available",
-            MediaStatus.PROCESSING: "requested",
-            MediaStatus.PENDING: "pending approval",
+            MediaStatus.PARTIALLY_AVAILABLE: "in your library",
+            MediaStatus.PROCESSING: "downloading",
+            MediaStatus.PENDING: "requested, pending approval",
             MediaStatus.UNKNOWN: "unknown",
             MediaStatus.NOT_TRACKED: "not requested",
             MediaStatus.BLOCKLISTED: "blocklisted",
             MediaStatus.DELETED: "deleted",
         }
-        return labels.get(self.status, "unknown")
+        label = labels.get(self.status, "unknown")
+        if self.status == MediaStatus.PROCESSING and self.download_progress:
+            label = f"downloading ({self.download_progress})"
+        return label
 
 
 @dataclass

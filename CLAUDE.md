@@ -12,6 +12,7 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **Secrets in `.env` only** -- never hardcode credentials or phone numbers
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
 - **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
+- **After code changes, run `./restart.sh`** -- always restart the daemon after modifying Python code
 
 ## Commands
 

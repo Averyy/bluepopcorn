@@ -16,7 +16,7 @@ class MorningDigest:
     def __init__(self, settings: Settings, seerr: SeerrClient) -> None:
         self.settings = settings
         self.seerr = seerr
-        self.client = httpx.AsyncClient(timeout=15)
+        self.client = httpx.AsyncClient(timeout=settings.http_timeout)
 
     async def build(self) -> str:
         """Build the morning digest message."""
@@ -62,14 +62,9 @@ class MorningDigest:
     async def _fetch_available(self) -> str | None:
         """Fetch recently available media from Seerr."""
         try:
-            available = await self.seerr.get_recent_available()
-            if available:
-                titles = []
-                for req in available[:3]:
-                    media = req.get("media", {})
-                    title = media.get("title") or media.get("name", "")
-                    if title:
-                        titles.append(title)
+            added = await self.seerr.get_recently_added(take=3)
+            if added:
+                titles = [item["title"] for item in added if item.get("title")]
                 if titles:
                     return f"Recently available: {', '.join(titles)}"
         except Exception as e:

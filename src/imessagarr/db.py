@@ -54,7 +54,8 @@ class BotDatabase:
 
     @property
     def db(self) -> aiosqlite.Connection:
-        assert self._db is not None, "Database not initialized"
+        if self._db is None:
+            raise RuntimeError("Database not initialized — call init() first")
         return self._db
 
     async def get_last_rowid(self) -> int | None:

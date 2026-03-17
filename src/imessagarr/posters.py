@@ -20,7 +20,7 @@ class PosterHandler:
     def __init__(self, settings: Settings) -> None:
         self.poster_dir = settings.resolve_path(settings.poster_dir)
         self.poster_dir.mkdir(parents=True, exist_ok=True)
-        self.client = httpx.AsyncClient(timeout=15)
+        self.client = httpx.AsyncClient(timeout=settings.http_timeout)
 
     async def download_poster(self, poster_path: str) -> Path | None:
         """Download a poster from TMDB, using cache."""

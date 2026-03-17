@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -53,6 +53,9 @@ class Settings:
 
     # Webhooks
     webhook_port: int = 8095
+
+    # HTTP
+    http_timeout: int = 15
 
     # Logging
     log_level: str = "INFO"
@@ -136,5 +139,6 @@ def load_settings(
         quiet_start=notifications.get("quiet_start", "22:00"),
         quiet_end=notifications.get("quiet_end", "07:00"),
         webhook_port=webhooks.get("port", 8095),
+        http_timeout=config.get("http", {}).get("timeout", 15),
         log_level=logging_cfg.get("level", "INFO"),
     )

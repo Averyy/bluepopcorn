@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import re
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,12 +17,16 @@ from .seerr import (
     SeerrClient,
     SeerrError,
     SeerrSearchError,
+    parse_download_progress,
+    seerr_title,
 )
 from .sender import MessageSender
-from .types import Action, LLMDecision, MediaStatus, RequestStatus, SearchResult
+from .types import Action, LLMDecision, MediaStatus, SearchResult
 from .weather import get_weather, get_pollen
 
 log = logging.getLogger(__name__)
+
+ERROR_GENERIC = "Something went wrong, try again in a sec."
 
 
 def format_search_results(results: list[SearchResult]) -> str:
@@ -65,7 +71,7 @@ async def _resolve_request_title(req: dict, seerr: SeerrClient) -> str:
         try:
             detail = await seerr.get_media_status(media_type, tmdb_id)
             if detail:
-                title = detail.get("title") or detail.get("name")
+                title = seerr_title(detail, default="")
                 if title:
                     return title
         except Exception:
@@ -75,6 +81,18 @@ async def _resolve_request_title(req: dict, seerr: SeerrClient) -> str:
     if slug and not slug.isdigit():
         return slug.replace("-", " ").title()
     return "Unknown"
+
+
+@dataclass
+class StatusData:
+    """Structured result from _fetch_status_data."""
+    processing_titles: list[str]
+    pending_titles: list[str]
+    recently_added: list[str]
+
+    @property
+    def has_activity(self) -> bool:
+        return bool(self.processing_titles or self.pending_titles or self.recently_added)
 
 
 class ActionExecutor:
@@ -93,6 +111,8 @@ class ActionExecutor:
         self.posters = posters
         self.db = db
         self.settings = settings
+        # Track recently sent poster tmdb_ids per phone to avoid re-sending
+        self._sent_posters: dict[str, set[int]] = {}
 
     async def handle_message(
         self,
@@ -148,72 +168,33 @@ class ActionExecutor:
         """Handle a bypass command directly (no LLM)."""
         if command == "status":
             try:
-                # Use request/count for quick overview
-                counts = await self.seerr.get_request_count()
-                has_activity = (
-                    counts.get("pending", 0)
-                    or counts.get("processing", 0)
-                    or counts.get("available", 0)
-                )
-
-                if not has_activity:
+                data = await self._fetch_status_data()
+                if not data.has_activity:
                     return "No pending or in-progress requests."
 
-                # Fetch details for active categories concurrently
-                tasks = []
-                fetch_processing = counts.get("processing", 0) > 0
-                fetch_pending = counts.get("pending", 0) > 0
-
-                if fetch_processing:
-                    tasks.append(self.seerr.get_processing())
-                if fetch_pending:
-                    tasks.append(self.seerr.get_pending())
-                # Always get recently added for context
-                tasks.append(self.seerr.get_recently_added(take=3))
-
-                results = await asyncio.gather(*tasks)
-                idx = 0
-
-                processing = results[idx] if fetch_processing else []
-                if fetch_processing:
-                    idx += 1
-                pending = results[idx] if fetch_pending else []
-                if fetch_pending:
-                    idx += 1
-                recently_added = results[idx]
-
-                # Resolve titles concurrently for all requests
-                all_reqs = list(processing[:5]) + list(pending[:5])
-                if all_reqs:
-                    titles = await asyncio.gather(
-                        *[_resolve_request_title(req, self.seerr) for req in all_reqs]
-                    )
-                else:
-                    titles = []
-                proc_count = min(len(processing), 5)
-
                 lines: list[str] = []
-                if processing:
+                if data.processing_titles:
                     lines.append("Downloading:")
-                    for title in titles[:proc_count]:
+                    for title in data.processing_titles:
                         lines.append(f"- {title}")
-                if pending:
+                if data.pending_titles:
                     lines.append("Waiting for approval:")
-                    for title in titles[proc_count:]:
+                    for title in data.pending_titles:
                         lines.append(f"- {title}")
-                if recently_added:
+                if data.recently_added:
                     lines.append("Recently added:")
-                    for item in recently_added[:3]:
-                        lines.append(f"- {item['title']}")
+                    for title in data.recently_added:
+                        lines.append(f"- {title}")
 
                 return "\n".join(lines) if lines else "No pending or in-progress requests."
             except Exception as e:
                 log.error("Status check failed: %s", e)
-                return "Something went wrong, try again in a sec."
+                return ERROR_GENERIC
 
         if command == "new":
             if sender_phone:
                 await self.db.clear_history(sender_phone)
+                self._sent_posters.pop(sender_phone, None)
             return "Fresh start. What's up?"
 
         if command == "help":
@@ -230,6 +211,51 @@ class ActionExecutor:
             )
 
         return "Unknown command."
+
+    async def _fetch_status_data(self) -> StatusData:
+        """Fetch processing/pending/recently-added data from Seerr.
+
+        Shared by bypass status command and LLM check_status action.
+        """
+        counts = await self.seerr.get_request_count()
+        fetch_processing = counts.get("processing", 0) > 0
+        fetch_pending = counts.get("pending", 0) > 0
+
+        # Gather only the requests that exist
+        coros = {}
+        if fetch_processing:
+            coros["processing"] = self.seerr.get_processing()
+        if fetch_pending:
+            coros["pending"] = self.seerr.get_pending()
+        coros["recent"] = self.seerr.get_recently_added(take=3)
+
+        keys = list(coros.keys())
+        results = await asyncio.gather(*coros.values())
+        fetched = dict(zip(keys, results))
+
+        processing = fetched.get("processing", [])
+        pending = fetched.get("pending", [])
+        recently_added = fetched.get("recent", [])
+
+        # Resolve titles concurrently
+        all_reqs = list(processing[:5]) + list(pending[:5])
+        if all_reqs:
+            titles = await asyncio.gather(
+                *[_resolve_request_title(req, self.seerr) for req in all_reqs]
+            )
+        else:
+            titles = []
+        proc_count = min(len(processing), 5)
+
+        proc_titles = [t for t in titles[:proc_count] if t != "Unknown"]
+        pend_titles = [t for t in titles[proc_count:] if t != "Unknown"]
+        added_titles = [item["title"] for item in recently_added[:3]]
+
+        return StatusData(
+            processing_titles=proc_titles,
+            pending_titles=pend_titles,
+            recently_added=added_titles,
+        )
 
     async def _llm_respond(self, sender_phone: str, fallback: str = "") -> str:
         """Build prompt with current history and let the LLM generate a response.
@@ -252,10 +278,10 @@ class ActionExecutor:
                 "LLM response returned action=%s message=%r instead of reply, using fallback",
                 decision.action.value, (decision.message or "")[:100],
             )
-            return fallback or "Something went wrong, try again in a sec."
+            return fallback or ERROR_GENERIC
         except Exception as e:
             log.error("LLM response call failed: %s", e)
-            return fallback or "Something went wrong, try again in a sec."
+            return fallback or ERROR_GENERIC
 
     async def _build_prompt(self, sender_phone: str) -> str:
         """Build the full prompt from conversation history."""
@@ -284,6 +310,32 @@ class ActionExecutor:
                 parts.append(f"<context>{entry.content}</context>")
 
         return "\n".join(parts)
+
+    async def _enrich_results(
+        self, results: list[SearchResult], *, enrich_downloads: bool = False
+    ) -> None:
+        """Fetch trailers, ratings, and optionally download progress for top results.
+
+        Mutates results in-place. Runs all fetches concurrently.
+        """
+        top = results[:3]
+        trailer_tasks = [self.seerr.get_trailer(r.media_type, r.tmdb_id) for r in top]
+        rating_tasks = [self.seerr.get_ratings(r.media_type, r.tmdb_id) for r in top]
+        progress_tasks = []
+        if enrich_downloads:
+            progress_tasks = [
+                self._enrich_download_progress(r) for r in top
+                if r.status == MediaStatus.PROCESSING and not r.download_progress
+            ]
+        all_results = await asyncio.gather(*trailer_tasks, *rating_tasks, *progress_tasks)
+        trailers = all_results[:len(top)]
+        ratings = all_results[len(top):len(top) * 2]
+        for i, trailer_url in enumerate(trailers):
+            if trailer_url and i < len(results):
+                results[i].trailer_url = trailer_url
+        for i, rating_dict in enumerate(ratings):
+            if rating_dict and i < len(results):
+                self._apply_ratings(results[i], rating_dict)
 
     async def _execute(self, decision: LLMDecision, sender_phone: str) -> str:
         """Execute an LLM decision and return the response text."""
@@ -317,34 +369,16 @@ class ActionExecutor:
             return f"Couldn't find anything for \"{query}\"."
         except Exception as e:
             log.error("Search failed for '%s': %s", query, e)
-            return "Something went wrong, try again in a sec."
+            return ERROR_GENERIC
 
         if not results:
             await self.db.add_history(sender_phone, "context", "[No results found]")
             return f"Couldn't find anything for \"{query}\"."
 
-        # Fetch trailers and ratings for top results (concurrently)
-        top = results[:3]
-        trailer_tasks = [
-            self.seerr.get_trailer(r.media_type, r.tmdb_id)
-            for r in top
-        ]
-        rating_tasks = [
-            self.seerr.get_ratings(r.media_type, r.tmdb_id)
-            for r in top
-        ]
-        all_results = await asyncio.gather(*trailer_tasks, *rating_tasks)
-        trailers = all_results[:len(top)]
-        ratings = all_results[len(top):]
-        for i, trailer_url in enumerate(trailers):
-            if trailer_url and i < len(results):
-                results[i].trailer_url = trailer_url
-        for i, rating_dict in enumerate(ratings):
-            if rating_dict and i < len(results):
-                self._apply_ratings(results[i], rating_dict)
+        await self._enrich_results(results, enrich_downloads=True)
 
         # Fetch history once for poster logic and narrowing
-        history = await self.db.get_history(sender_phone) if (self.sender and self.posters) or len(results) > 1 else []
+        history = await self.db.get_history(sender_phone)
 
         # If multiple results but one matches a recently discussed title, narrow to it
         if len(results) > 1:
@@ -375,22 +409,13 @@ class ActionExecutor:
                 "status", "done", "ready", "downloading", "is it",
                 "update", "progress", "where is", "how is",
             ))
-            # Check if top result was already shown in recent context
-            already_shown = False
-            for entry in reversed(history):
-                if entry.role == "context" and results and f"tmdb:{results[0].tmdb_id}" in entry.content:
-                    already_shown = True
-                    break
-                if entry.role == "user":
-                    break  # Only check context from current exchange
+            # Skip poster if it was already sent (e.g. in a collage from recommend)
+            already_shown = results[0].tmdb_id in self._sent_posters.get(sender_phone, set())
             if adding and len(results) > 1:
-                # Filter to results with posters so collage indices match text list
-                results_with_posters = [r for r in results if r.poster_path]
-                if results_with_posters:
-                    results = results_with_posters
-                await self._send_posters(sender_phone, results)
+                results = await self._send_result_posters(sender_phone, results)
             elif not checking_status and not already_shown and results:
                 await self._send_single_poster(sender_phone, results[0])
+                await self.sender.start_typing(sender_phone)
 
         # Store results as context, then let the LLM craft the response.
         # The LLM sees search results + conversation history and can:
@@ -417,6 +442,7 @@ class ActionExecutor:
             poster = await self.posters.get_single_poster(result)
             if poster:
                 await self.sender.send_image(phone, str(poster))
+                self._sent_posters.setdefault(phone, set()).add(result.tmdb_id)
         except Exception as e:
             log.error("Failed to send single poster: %s", e)
 
@@ -436,18 +462,32 @@ class ActionExecutor:
                 collage = await self.posters.create_collage(results)
                 if collage:
                     await self.sender.send_image(phone, str(collage))
+            # Track all tmdb_ids that were shown
+            sent = self._sent_posters.setdefault(phone, set())
+            for r in results:
+                sent.add(r.tmdb_id)
         except Exception as e:
             log.error("Failed to send poster: %s", e)
 
-    def _format_results_plain(self, results: list[SearchResult]) -> str:
-        """Plain text fallback for search results."""
-        lines: list[str] = []
-        for i, r in enumerate(results, 1):
-            year = f" ({r.year})" if r.year else ""
-            status = f" [{r.status_label}]" if r.status != MediaStatus.NOT_TRACKED else ""
-            lines.append(f"{i}. {r.title}{year}{status}")
-        lines.append("\nWhich one?")
-        return "\n".join(lines)
+    async def _send_result_posters(
+        self, phone: str, results: list[SearchResult]
+    ) -> list[SearchResult]:
+        """Send poster(s) for results and restart typing indicator.
+
+        Filters to results with posters for collages. Returns the
+        (possibly filtered) results list so callers can use it for formatting.
+        """
+        if not self.sender or not self.posters:
+            return results
+        if len(results) > 1:
+            results_with_posters = [r for r in results if r.poster_path]
+            if results_with_posters:
+                results = results_with_posters
+            await self._send_posters(phone, results)
+        else:
+            await self._send_single_poster(phone, results[0])
+        await self.sender.start_typing(phone)
+        return results
 
     @staticmethod
     def _apply_ratings(result: SearchResult, rating_dict: dict) -> None:
@@ -485,6 +525,16 @@ class ActionExecutor:
         return text[:max_len]
 
     @staticmethod
+    def _filter_available(results: list[SearchResult], take: int = 3) -> list[SearchResult]:
+        """Prefer results the user doesn't already have for recommendations."""
+        new = [r for r in results if r.status not in (
+            MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE,
+        )]
+        if new:
+            return new[:take]
+        return results[:take]
+
+    @staticmethod
     def _format_single_result(r: SearchResult) -> str:
         """Format a single search result as a casual text message."""
         year = f" ({r.year})" if r.year else ""
@@ -514,7 +564,10 @@ class ActionExecutor:
         elif r.status == MediaStatus.PARTIALLY_AVAILABLE:
             parts.append("Some of this is already available. Want me to request the rest?")
         elif r.status == MediaStatus.PROCESSING:
-            parts.append("Already requested, it's on its way.")
+            if r.download_progress:
+                parts.append(f"Currently downloading ({r.download_progress}).")
+            else:
+                parts.append("Currently downloading.")
         elif r.status == MediaStatus.PENDING:
             parts.append("Already requested, waiting on approval.")
         elif r.status == MediaStatus.BLOCKLISTED:
@@ -603,7 +656,7 @@ class ActionExecutor:
                 break
         pollen_specific = any(kw in last_user_msg for kw in ("pollen", "allerg"))
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=self.settings.http_timeout) as client:
                 weather, pollen = await asyncio.gather(
                     get_weather(self.settings, client),
                     get_pollen(self.settings, client, pollen_specific=pollen_specific),
@@ -628,59 +681,17 @@ class ActionExecutor:
     async def _handle_check_status(self, decision: LLMDecision, sender_phone: str) -> str:
         """Check pending/processing requests, store as context, let LLM respond."""
         try:
-            counts = await self.seerr.get_request_count()
-            has_activity = (
-                counts.get("pending", 0)
-                or counts.get("processing", 0)
-                or counts.get("available", 0)
-            )
-
-            if not has_activity:
+            status = await self._fetch_status_data()
+            if not status.has_activity:
                 return "No pending or in-progress requests."
 
-            tasks = []
-            fetch_processing = counts.get("processing", 0) > 0
-            fetch_pending = counts.get("pending", 0) > 0
-
-            if fetch_processing:
-                tasks.append(self.seerr.get_processing())
-            if fetch_pending:
-                tasks.append(self.seerr.get_pending())
-            tasks.append(self.seerr.get_recently_added(take=3))
-
-            results = await asyncio.gather(*tasks)
-            idx = 0
-
-            processing = results[idx] if fetch_processing else []
-            if fetch_processing:
-                idx += 1
-            pending = results[idx] if fetch_pending else []
-            if fetch_pending:
-                idx += 1
-            recently_added = results[idx]
-
-            # Resolve titles concurrently
-            all_reqs = list(processing[:5]) + list(pending[:5])
-            if all_reqs:
-                titles = await asyncio.gather(
-                    *[_resolve_request_title(req, self.seerr) for req in all_reqs]
-                )
-            else:
-                titles = []
-            proc_count = min(len(processing), 5)
-
             lines: list[str] = []
-            if processing:
-                proc_titles = [t for t in titles[:proc_count] if t != "Unknown"]
-                if proc_titles:
-                    lines.append("Downloading: " + ", ".join(proc_titles))
-            if pending:
-                pend_titles = [t for t in titles[proc_count:] if t != "Unknown"]
-                if pend_titles:
-                    lines.append("Waiting for approval: " + ", ".join(pend_titles))
-            if recently_added:
-                added_titles = [item["title"] for item in recently_added[:3]]
-                lines.append("Recently added: " + ", ".join(added_titles))
+            if status.processing_titles:
+                lines.append("Downloading: " + ", ".join(status.processing_titles))
+            if status.pending_titles:
+                lines.append("Waiting for approval: " + ", ".join(status.pending_titles))
+            if status.recently_added:
+                lines.append("Recently added: " + ", ".join(status.recently_added))
 
             if not lines:
                 return "No pending or in-progress requests."
@@ -690,7 +701,7 @@ class ActionExecutor:
             return await self._llm_respond(sender_phone, fallback=data)
         except Exception as e:
             log.error("Status check failed: %s", e)
-            return "Something went wrong, try again in a sec."
+            return ERROR_GENERIC
 
     async def _handle_recent(self, decision: LLMDecision, sender_phone: str) -> str:
         """Check recently added media and pending requests."""
@@ -723,13 +734,19 @@ class ActionExecutor:
             return await self._llm_respond(sender_phone, fallback=data)
         except Exception as e:
             log.error("Recent media fetch failed: %s", e)
-            return "Something went wrong, try again in a sec."
+            return ERROR_GENERIC
 
     async def _handle_recommend(self, decision: LLMDecision, sender_phone: str) -> str:
         """Discover movies/shows by genre, year, trending, or similar to a title."""
-        import re
-
         query = (decision.query or decision.message or "").lower()
+
+        # Collect tmdb_ids already shown in this conversation to avoid repeats
+        history = await self.db.get_history(sender_phone)
+        shown_ids: set[int] = set()
+        for entry in history:
+            if entry.role == "context":
+                for m in re.finditer(r"tmdb:(\d+)", entry.content):
+                    shown_ids.add(int(m.group(1)))
 
         # Check for "similar to X" / "something like X" / "like X" / "more like X"
         similar_match = re.match(
@@ -747,43 +764,22 @@ class ActionExecutor:
             if search_results:
                 base = search_results[0]
                 try:
-                    results = await self.seerr.get_recommendations(base.media_type, base.tmdb_id)
+                    results = await self.seerr.get_recommendations(
+                        base.media_type, base.tmdb_id, take=10, exclude_ids=shown_ids,
+                    )
                     if not results:
-                        results = await self.seerr.get_similar(base.media_type, base.tmdb_id)
+                        results = await self.seerr.get_similar(
+                            base.media_type, base.tmdb_id, take=10, exclude_ids=shown_ids,
+                        )
                 except SeerrError as e:
                     log.error("Recommendations/similar lookup failed: %s", e)
                     results = []
 
                 if results:
-                    # Fetch trailers and ratings for results (concurrently)
-                    top = results[:3]
-                    trailer_tasks = [
-                        self.seerr.get_trailer(r.media_type, r.tmdb_id)
-                        for r in top
-                    ]
-                    rating_tasks = [
-                        self.seerr.get_ratings(r.media_type, r.tmdb_id)
-                        for r in top
-                    ]
-                    all_fetched = await asyncio.gather(*trailer_tasks, *rating_tasks)
-                    trailers = all_fetched[:len(top)]
-                    ratings = all_fetched[len(top):]
-                    for i, trailer_url in enumerate(trailers):
-                        if trailer_url and i < len(results):
-                            results[i].trailer_url = trailer_url
-                    for i, rating_dict in enumerate(ratings):
-                        if rating_dict and i < len(results):
-                            self._apply_ratings(results[i], rating_dict)
+                    results = self._filter_available(results, take=3)
+                    await self._enrich_results(results)
 
-                    # Send poster(s)
-                    if self.sender and self.posters:
-                        if len(results) > 1:
-                            results_with_posters = [r for r in results if r.poster_path]
-                            if results_with_posters:
-                                results = results_with_posters
-                            await self._send_posters(sender_phone, results)
-                        else:
-                            await self._send_single_poster(sender_phone, results[0])
+                    results = await self._send_result_posters(sender_phone, results)
 
                     # Store context and let LLM craft the response
                     await self.db.add_history(
@@ -806,9 +802,15 @@ class ActionExecutor:
         # If neither specified, do both
         want_both = not want_movie and not want_tv
 
-        # Extract year (4-digit number)
-        year_match = re.search(r"\b(19\d{2}|20\d{2})\b", query)
-        year = int(year_match.group(1)) if year_match else None
+        # Extract year(s) — support ranges like "2024 2025"
+        year_matches = re.findall(r"\b(19\d{2}|20\d{2})\b", query)
+        if year_matches:
+            years = sorted(set(int(y) for y in year_matches))
+            year = years[0]
+            year_end = years[-1] if len(years) > 1 else None
+        else:
+            year = None
+            year_end = None
 
         # Find genre keyword using dynamic genre maps
         genre_keyword: str | None = None
@@ -834,58 +836,46 @@ class ActionExecutor:
         try:
             results: list[SearchResult] = []
             if is_trending and not genre_keyword and not year:
-                results = await self.seerr.discover_trending(take=3)
+                results = await self.seerr.discover_trending(take=10, exclude_ids=shown_ids)
             elif want_both:
                 movie_genre_id = movie_genres.get(genre_keyword) if genre_keyword else None
                 tv_genre_id = tv_genres.get(genre_keyword) if genre_keyword else None
                 movie_results, tv_results = await asyncio.gather(
-                    self.seerr.discover_movies(genre_id=movie_genre_id, year=year, take=2),
-                    self.seerr.discover_tv(genre_id=tv_genre_id, year=year, take=2),
+                    self.seerr.discover_movies(
+                        genre_id=movie_genre_id, year=year, year_end=year_end,
+                        take=6, exclude_ids=shown_ids,
+                    ),
+                    self.seerr.discover_tv(
+                        genre_id=tv_genre_id, year=year, year_end=year_end,
+                        take=6, exclude_ids=shown_ids,
+                    ),
                 )
-                results = (movie_results + tv_results)[:3]
+                results = movie_results + tv_results
             elif want_movie:
                 genre_id = movie_genres.get(genre_keyword) if genre_keyword else None
-                results = await self.seerr.discover_movies(genre_id=genre_id, year=year, take=3)
+                results = await self.seerr.discover_movies(
+                    genre_id=genre_id, year=year, year_end=year_end,
+                    take=10, exclude_ids=shown_ids,
+                )
             else:  # want_tv
                 genre_id = tv_genres.get(genre_keyword) if genre_keyword else None
-                results = await self.seerr.discover_tv(genre_id=genre_id, year=year, take=3)
+                results = await self.seerr.discover_tv(
+                    genre_id=genre_id, year=year, year_end=year_end,
+                    take=10, exclude_ids=shown_ids,
+                )
         except Exception as e:
             log.error("Discover failed: %s", e)
-            return "Something went wrong, try again in a sec."
+            return ERROR_GENERIC
 
         if not results:
             return "Couldn't find any recommendations for that."
 
-        # Fetch trailers and ratings for top results (concurrently)
-        top = results[:3]
-        trailer_tasks = [
-            self.seerr.get_trailer(r.media_type, r.tmdb_id)
-            for r in top
-        ]
-        rating_tasks = [
-            self.seerr.get_ratings(r.media_type, r.tmdb_id)
-            for r in top
-        ]
-        all_results = await asyncio.gather(*trailer_tasks, *rating_tasks)
-        trailers = all_results[:len(top)]
-        ratings = all_results[len(top):]
-        for i, trailer_url in enumerate(trailers):
-            if trailer_url and i < len(results):
-                results[i].trailer_url = trailer_url
-        for i, rating_dict in enumerate(ratings):
-            if rating_dict and i < len(results):
-                self._apply_ratings(results[i], rating_dict)
+        # Prefer results the user doesn't already have
+        results = self._filter_available(results, take=3)
 
-        # Send poster(s)
-        if self.sender and self.posters:
-            if len(results) > 1:
-                # Filter to results with posters so collage indices match text list
-                results_with_posters = [r for r in results if r.poster_path]
-                if results_with_posters:
-                    results = results_with_posters
-                await self._send_posters(sender_phone, results)
-            else:
-                await self._send_single_poster(sender_phone, results[0])
+        await self._enrich_results(results)
+
+        results = await self._send_result_posters(sender_phone, results)
 
         # Store context and let LLM craft the response
         context = format_search_results(results)
@@ -924,7 +914,7 @@ class ActionExecutor:
         try:
             detail = await self.seerr.get_media_status(decision.media_type, decision.tmdb_id)
             if detail:
-                title = detail.get("title") or detail.get("name", "this")
+                title = seerr_title(detail, default="this")
                 media_info = detail.get("mediaInfo")
                 if media_info:
                     raw_status = media_info.get("status", 0)
@@ -938,7 +928,7 @@ class ActionExecutor:
                         return f"{title} is already in your library."
                     elif status == MediaStatus.PROCESSING:
                         await self._store_request_context(sender_phone, title, decision)
-                        return f"{title} is already requested and on its way."
+                        return f"{title} is already downloading."
                     elif status == MediaStatus.PENDING:
                         await self._store_request_context(sender_phone, title, decision)
                         return f"{title} is already requested, waiting on approval."
@@ -951,7 +941,25 @@ class ActionExecutor:
             return decision.message
         except Exception as e:
             log.error("Request failed (type=%s tmdb=%s): %s", decision.media_type, decision.tmdb_id, e)
-            return "Something went wrong, try again in a sec."
+            return ERROR_GENERIC
+
+    async def _enrich_download_progress(self, result: SearchResult) -> None:
+        """Fetch download progress from the detail endpoint for a PROCESSING result.
+
+        The search API may not include downloadStatus; the detail endpoint does.
+        Mutates the result in-place.
+        """
+        try:
+            detail = await self.seerr.get_media_status(result.media_type, result.tmdb_id)
+            if not detail:
+                return
+            media_info = detail.get("mediaInfo") or {}
+            progress = parse_download_progress(media_info)
+            if progress:
+                result.download_progress = progress
+        except Exception as e:
+            log.debug("Download progress enrichment failed for %s/%d: %s",
+                      result.media_type, result.tmdb_id, e)
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision

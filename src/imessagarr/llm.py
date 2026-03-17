@@ -62,7 +62,10 @@ class LLMClient:
             "--system-prompt", system_prompt,
         ]
 
-        log.info("LLM call: model=%s, prompt_len=%d", use_model, len(prompt))
+        log.info(
+            "LLM call: model=%s, prompt_len=%d, system_len=%d",
+            use_model, len(prompt), len(system_prompt),
+        )
         start = time.monotonic()
 
         try:
@@ -77,12 +80,14 @@ class LLMClient:
         except asyncio.TimeoutError:
             # Kill the zombie subprocess
             proc.kill()
-            _, stderr = await proc.communicate()
-            err = stderr.decode("utf-8", errors="ignore").strip() if stderr else ""
+            kill_stdout, kill_stderr = await proc.communicate()
+            out = kill_stdout.decode("utf-8", errors="ignore").strip() if kill_stdout else ""
+            err = kill_stderr.decode("utf-8", errors="ignore").strip() if kill_stderr else ""
             log.error(
-                "LLM call timed out after %ds (model=%s, prompt_len=%d)%s",
+                "LLM call timed out after %ds (model=%s, prompt_len=%d)%s%s",
                 self.timeout, use_model, len(prompt),
-                f" stderr: {err[:200]}" if err else "",
+                f"\n  stdout: {out[:500]}" if out else "",
+                f"\n  stderr: {err[:500]}" if err else "",
             )
             # Try fallback model if this was the primary
             if use_model == self.model and use_model != self.fallback_model:
@@ -93,13 +98,22 @@ class LLMClient:
         duration = time.monotonic() - start
 
         if proc.returncode != 0:
-            error = stderr.decode("utf-8", errors="ignore").strip()
-            log.error("LLM call failed (rc=%d): %s", proc.returncode, error)
+            err = stderr.decode("utf-8", errors="ignore").strip()
+            out = stdout.decode("utf-8", errors="ignore").strip()
+            log.error(
+                "LLM call failed (rc=%d, model=%s)%s%s",
+                proc.returncode, use_model,
+                f"\n  stdout: {out[:500]}" if out else "",
+                f"\n  stderr: {err[:500]}" if err else "",
+            )
+            # Don't retry on signal kills (negative rc = killed by signal, e.g. SIGTERM during shutdown)
+            if proc.returncode < 0:
+                raise RuntimeError(f"claude -p killed by signal {-proc.returncode}")
             # Try fallback model if this was the primary
             if use_model == self.model and use_model != self.fallback_model:
                 log.info("Retrying with fallback model: %s", self.fallback_model)
                 return await self.decide(prompt, model=self.fallback_model)
-            raise RuntimeError(f"claude -p failed: {error}")
+            raise RuntimeError(f"claude -p failed (rc={proc.returncode}): {err or out[:200]}")
 
         raw = stdout.decode("utf-8", errors="ignore").strip()
         try:
@@ -119,11 +133,11 @@ class LLMClient:
         metadata = {
             "model": use_model,
             "duration_s": round(duration, 2),
-            "cost_usd": response.get("cost_usd", 0),
+            "estimated_cost_usd": response.get("total_cost_usd", 0),
             "session_id": response.get("session_id"),
         }
         log.info(
-            "LLM decision: action=%s, model=%s, duration=%.1fs, cost=$%.6f",
-            decision.action.value, use_model, duration, metadata["cost_usd"],
+            "LLM decision: action=%s, model=%s, duration=%.1fs, estimated_cost=$%.6f",
+            decision.action.value, use_model, duration, metadata["estimated_cost_usd"],
         )
         return decision, metadata
