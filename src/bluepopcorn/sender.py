@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 
 class MessageSender:
     def __init__(self, settings: Settings) -> None:
-        self.bot_apple_id = settings.bot_apple_id
         self.max_length = settings.max_message_length
 
     async def _run_applescript(self, script: str, timeout: int = 10) -> tuple[bool, str]:
@@ -35,7 +34,7 @@ class MessageSender:
             error = stderr.decode("utf-8", errors="ignore").strip()
             if "not allowed to send keystrokes" in error:
                 log.error(
-                    "Accessibility permission denied — remove and re-add iMessagarr.app "
+                    "Accessibility permission denied — remove and re-add BluePopcorn.app "
                     "in System Settings > Privacy & Security > Accessibility"
                 )
             else:

@@ -7,7 +7,7 @@ dist/
 .venv/
 *.log
 *.log.*
-/iMessagarr
-iMessagarr.app/Contents/MacOS/iMessagarr
-com.imessagarr.daemon.plist
+/BluePopcorn
+BluePopcorn.app/Contents/MacOS/BluePopcorn
+com.bluepopcorn.daemon.plist
 data/

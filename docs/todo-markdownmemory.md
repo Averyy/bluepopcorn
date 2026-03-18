@@ -2,7 +2,7 @@
 
 ## Context
 
-Currently iMessagarr duplicates every message into a SQLite `history` table and stores user preferences in a `user_facts` table. This is redundant — raw messages already exist in iMessage's `chat.db`, and flat SQL rows of preferences are just a markdown file with extra steps. Worse, conversation history older than 1 hour is silently deleted with zero compression, so the bot has no long-term memory of past interactions.
+Currently BluePopcorn duplicates every message into a SQLite `history` table and stores user preferences in a `user_facts` table. This is redundant — raw messages already exist in iMessage's `chat.db`, and flat SQL rows of preferences are just a markdown file with extra steps. Worse, conversation history older than 1 hour is silently deleted with zero compression, so the bot has no long-term memory of past interactions.
 
 **Goal:** Replace SQL-based history and facts with per-user markdown files that support tiered compression — recent messages stay verbatim (from chat.db), older conversations get progressively summarized into the markdown file. The bot gains persistent, useful memory across days/weeks/months while keeping prompts small. Drop SQLite entirely.
 
@@ -28,7 +28,7 @@ Currently iMessagarr duplicates every message into a SQLite `history` table and 
 - **Bi-temporal tracking**: "when it became true" vs "when you documented it"
 - Search via ripgrep — no vector DB needed at personal scale
 
-### Key Takeaways for iMessagarr
+### Key Takeaways for BluePopcorn
 1. **Markdown is the lingua franca** — every LLM already knows how to read/write it. No serialization layer needed.
 2. **Two tiers minimum**: Curated preferences (persistent) + episodic summaries (rolling compressed). This is what we're building.
 3. **No vector search needed** — we have 1-2 users, the full memory file fits in the prompt. Just load it.
@@ -100,7 +100,7 @@ File: `data/memory/{phone}.md` (e.g. `data/memory/+1XXXXXXXXXX.md`)
 
 ## Files to Modify
 
-### 1. New: `src/imessagarr/memory.py` — Per-user markdown memory manager
+### 1. New: `src/bluepopcorn/memory.py` — Per-user markdown memory manager
 
 All methods are **synchronous** (plain file I/O). Markdown files are tiny (<200 lines). No async needed — avoids aiosqlite-style ceremony for something that takes <1ms.
 
@@ -118,7 +118,7 @@ Responsibilities:
 - `truncate_if_needed(sender, max_lines=200)` → if file exceeds limit, trim oldest `# History` entries first
 - Phone number used directly as filename (e.g. `+1XXXXXXXXXX.md`)
 
-### 2. New: `src/imessagarr/compression.py` — Tiered compression engine
+### 2. New: `src/bluepopcorn/compression.py` — Tiered compression engine
 
 Responsibilities:
 - `compress_daily(sender, messages)` → send a day's raw messages to LLM, get summary + optional preference suggestions, append to `# Recent`
@@ -148,7 +148,7 @@ Responsibilities:
 
 **Multi-day catch-up:** If the bot was down for several days, compression processes each missed day individually rather than lumping them together. Query chat.db day-by-day. Track last compression date in the memory file or a small `data/last_compressed` file.
 
-### 3. Modify: `src/imessagarr/monitor.py` — Add recent message query
+### 3. Modify: `src/bluepopcorn/monitor.py` — Add recent message query
 
 Add method: `get_recent_messages(sender, limit, since_hours)` → query chat.db for both directions (`is_from_me` 0 and 1) for a specific sender within a time window. Returns `list[HistoryEntry]` with role="user" or role="assistant".
 
@@ -174,9 +174,9 @@ LIMIT ?
 
 Also add: `get_messages_for_date(sender, date)` → query chat.db for all messages on a specific date (using `date BETWEEN ? AND ?` for day boundaries). Used by the compression engine to get yesterday's conversation for summarization.
 
-### 4. Modify: `src/imessagarr/actions.py` — Rewrite prompt building and memory actions
+### 4. Modify: `src/bluepopcorn/actions/` package — Rewrite prompt building and memory actions
 
-This is the core of the migration. There are **18 `self.db.*` call sites** to replace:
+This is the core of the migration. `actions.py` was split into a handler package (`__init__.py`, `_base.py`, `search.py`, `request.py`, `status.py`, `weather.py`, `recent.py`, `recommend.py`, `memory.py`). The **18 `self.db.*` call sites** are spread across these files — locate each with a grep before starting:
 
 **Complete call site map (validated against code):**
 
@@ -236,7 +236,7 @@ CLI has no chat.db for outgoing messages. `_build_prompt()` must branch: if `sel
 **`_handle_remember()`** → call `memory.add_preference()` instead of `db.add_fact()`
 **`_handle_forget()`** → call `memory.remove_preference()` instead of `db.remove_fact()`
 
-### 5. Delete: `src/imessagarr/db.py`
+### 5. Delete: `src/bluepopcorn/db.py`
 
 Remove entirely. ROWID cursor becomes an in-memory int with a write-through file cache:
 - On startup: read `data/last_rowid` if it exists, otherwise fall back to `monitor.get_max_rowid()`
@@ -244,7 +244,7 @@ Remove entirely. ROWID cursor becomes an in-memory int with a write-through file
 - This means restarts pick up where they left off, no missed messages
 - Lives in `__main__.py` or a tiny helper, not a whole db module
 
-### 6. Modify: `src/imessagarr/__main__.py` — Replace db wiring + wire compression
+### 6. Modify: `src/bluepopcorn/__main__.py` — Replace db wiring + wire compression
 
 **Replace BotDatabase with UserMemory:**
 - Remove `BotDatabase` import, add `UserMemory` import
@@ -270,7 +270,7 @@ for phone in settings.allowed_senders:
 
 **Note:** `digest.py` and `webhooks.py` have zero `db.py` references — confirmed no changes needed.
 
-### 7. Modify: `src/imessagarr/config.py` — Update settings
+### 7. Modify: `src/bluepopcorn/config.py` — Update settings
 
 - Add `memory_dir: str = "data/memory"` setting, wire to `[paths]` in config.toml
 - Remove `db_path` setting entirely (no more SQLite)
@@ -289,7 +289,7 @@ memory_dir = "data/memory"
 conversation_gap_hours = 2.0
 ```
 
-### 9. Modify: `src/imessagarr/llm.py` — Update system prompt loading
+### 9. Modify: `src/bluepopcorn/llm.py` — Update system prompt loading
 
 - Remove `memory.md` from the file list in `_load_system_prompt()`
 - Only load `personality.md` + `instructions.md`
@@ -307,7 +307,7 @@ Add a `## Defaults` section with rules from the old `memory.md`:
 
 No longer needed — global rules live in `instructions.md`, per-user memory lives in `data/memory/`.
 
-### 12. Modify: `src/imessagarr/cli.py` — Update for new memory system
+### 12. Modify: `src/bluepopcorn/cli.py` — Update for new memory system
 
 CLI test mode needs to work without chat.db:
 - Replace `BotDatabase` with `UserMemory` — no `db.init()`, no `db.clear_history()`, no `db.close()`
@@ -394,7 +394,7 @@ Three phases. The bot works after Phase 2 without compression — Phase 3 is a f
 
 ### Phase 2: The Swap (atomic — all in one commit, breaks if partial)
 
-6. `actions.py` — rewrite constructor, `_build_prompt()`, all 18 db call sites, add context buffer + session start + CLI history + poster intent fix
+6. `actions/` package — rewrite constructor (`__init__.py`), `_build_prompt()` (`_base.py`), all 18 db call sites across handlers, add context buffer + session start + CLI history + poster intent fix
 7. `__main__.py` — replace BotDatabase with UserMemory, ROWID file cache, new ActionExecutor wiring
 8. `cli.py` — replace BotDatabase with UserMemory, pass monitor=None
 9. Delete `db.py`
@@ -418,7 +418,7 @@ Three phases. The bot works after Phase 2 without compression — Phase 3 is a f
 
 0. **SQL test first (before any code)**: Run the `chat_message_join` query directly against chat.db with a known phone number. Verify it returns both incoming (`is_from_me=0`) and outgoing (`is_from_me=1`) messages with correct content. This validates the JOIN and phone format matching before we build on it.
 1. **Unit test memory.py**: Create/read/modify per-user markdown files, verify section parsing, duplicate detection, truncation
-2. **CLI mode** (`uv run -m imessagarr --cli`): Test full conversation flow with markdown memory
+2. **CLI mode** (`uv run -m bluepopcorn --cli`): Test full conversation flow with markdown memory
    - "remember I like sci-fi" → check markdown file created with preference
    - "forget sci-fi" → check line removed
    - Conversation context works (search → confirm → request)

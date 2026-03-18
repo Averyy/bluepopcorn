@@ -33,6 +33,8 @@ Note: The OpenAPI spec still says 6=DELETED (inherited from Overseerr). The actu
 
 ## Authentication
 
+**Our bot uses `X-Api-Key` header auth** — set `SEERR_API_KEY` in `.env`, passed as a request header on every call. No session cookies needed. The endpoints below are reference for other auth methods.
+
 - `POST /api/v1/auth/local` (public) -- sign in with email/password
   - Body: `{email, password}`
   - Returns `User` object + `connect.sid` session cookie

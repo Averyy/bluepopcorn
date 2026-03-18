@@ -190,6 +190,7 @@ class ActionExecutor:
     async def _llm_respond(self, sender_phone: str, fallback: str = "") -> str:
         """Build prompt with current history and let the LLM generate a response."""
         prompt = await self._build_prompt(sender_phone)
+        prompt += "\n<context>[The results above have already been fetched and sent. Your job now is only to write the reply message. Respond with action=reply.]</context>"
         try:
             decision, meta = await self.llm.decide(prompt)
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])

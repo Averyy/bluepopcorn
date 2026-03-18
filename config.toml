@@ -1,7 +1,7 @@
 [llm]
 model = "haiku"
 fallback_model = "sonnet"
-timeout = 30
+timeout = 60
 
 [polling]
 interval = 0.5
@@ -18,10 +18,10 @@ name = "St. Catharines"
 timezone = "America/Toronto"
 
 [paths]
-poster_dir = "~/Pictures/imessagarr"
-db_path = "~/.local/share/imessagarr/bot.db"
+poster_dir = "~/Pictures/bluepopcorn"
+db_path = "~/.local/share/bluepopcorn/bot.db"
 chat_db_path = "~/Library/Messages/chat.db"
-log_path = "imessagarr.log"
+log_path = "bluepopcorn.log"
 
 [messages]
 max_length = 1200

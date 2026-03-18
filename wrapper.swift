@@ -1,13 +1,13 @@
 import Foundation
 
 // Resolve project root from binary location:
-// 4 path components: iMessagarr → MacOS → Contents → iMessagarr.app
+// 4 path components: BluePopcorn → MacOS → Contents → BluePopcorn.app
 let binary = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
 let projectRoot = binary.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
 let task = Process()
 task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/uv")
-task.arguments = ["run", "-m", "imessagarr"]
+task.arguments = ["run", "-m", "bluepopcorn"]
 task.currentDirectoryURL = projectRoot
 task.environment = ProcessInfo.processInfo.environment
 

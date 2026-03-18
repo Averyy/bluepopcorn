@@ -23,10 +23,10 @@ from .sender import MessageSender
 from .types import IncomingMessage
 from .webhooks import WebhookServer
 
-log = logging.getLogger("imessagarr")
+log = logging.getLogger("bluepopcorn")
 
 
-def setup_logging(level: str, log_path: str = "imessagarr.log") -> None:
+def setup_logging(level: str, log_path: str = "bluepopcorn.log") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     # Clear any existing handlers to avoid duplicates
@@ -56,11 +56,6 @@ def setup_logging(level: str, log_path: str = "imessagarr.log") -> None:
 async def run_digest(settings: Settings) -> None:
     """One-shot digest: print and optionally send."""
     seerr = SeerrClient(settings)
-    try:
-        await seerr.authenticate()
-    except Exception as e:
-        print(f"Seerr auth failed: {e}")
-
     digest = MorningDigest(settings, seerr)
     text = await digest.build()
     print(text)
@@ -76,7 +71,7 @@ async def run_digest(settings: Settings) -> None:
 
 async def run_daemon(settings: Settings) -> None:
     """Main async daemon loop."""
-    log.info("Starting iMessagarr daemon")
+    log.info("Starting BluePopcorn daemon")
 
     # Init components
     seerr = SeerrClient(settings)
@@ -87,19 +82,6 @@ async def run_daemon(settings: Settings) -> None:
     monitor = MessageMonitor(settings)
 
     await db.init()
-
-    for attempt in range(1, 13):  # retry up to ~2 minutes
-        try:
-            await seerr.authenticate()
-            break
-        except Exception as e:
-            if attempt == 12:
-                log.error("Seerr auth failed after 12 attempts: %s", e)
-                log.warning("Starting without Seerr — search/request won't work")
-            else:
-                delay = min(attempt * 5, 15)
-                log.warning("Seerr auth attempt %d failed: %s — retrying in %ds", attempt, e, delay)
-                await asyncio.sleep(delay)
 
     # Ensure poster dir exists
     settings.resolve_path(settings.poster_dir).mkdir(parents=True, exist_ok=True)
@@ -258,7 +240,7 @@ async def _check_accessibility() -> None:
     """Trigger Accessibility permission prompt on first run.
 
     Sends a no-op System Events command so macOS shows the permission
-    dialog attributed to the running binary (e.g. 'iMessagarr').
+    dialog attributed to the running binary (e.g. 'BluePopcorn').
     """
     proc = await asyncio.create_subprocess_exec(
         "osascript", "-e",
@@ -330,7 +312,7 @@ async def _schedule_digest(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="iMessagarr - iMessage Seerr bot")
+    parser = argparse.ArgumentParser(description="BluePopcorn - iMessage Seerr bot")
     parser.add_argument("--cli", action="store_true", help="Run in CLI test mode")
     parser.add_argument("--digest", action="store_true", help="Run one-shot digest")
     args = parser.parse_args()

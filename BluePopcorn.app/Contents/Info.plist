@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.imessagarr.daemon</string>
+    <string>com.bluepopcorn.daemon</string>
 
     <key>CFBundleName</key>
-    <string>iMessagarr</string>
+    <string>BluePopcorn</string>
 
     <key>CFBundleExecutable</key>
-    <string>iMessagarr</string>
+    <string>BluePopcorn</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -24,9 +24,9 @@
     <true/>
 
     <key>NSLocalNetworkUsageDescription</key>
-    <string>iMessagarr connects to your local Seerr server to manage media requests.</string>
+    <string>BluePopcorn connects to your local Seerr server to manage media requests.</string>
 
     <key>NSAppleEventsUsageDescription</key>
-    <string>iMessagarr uses AppleScript to send iMessages and show typing indicators.</string>
+    <string>BluePopcorn uses AppleScript to send iMessages and show typing indicators.</string>
 </dict>
 </plist>

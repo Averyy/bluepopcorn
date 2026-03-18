@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.imessagarr.daemon</string>
+    <string>com.bluepopcorn.daemon</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/imessagarr/iMessagarr.app/Contents/MacOS/iMessagarr</string>
+        <string>/path/to/bluepopcorn/BluePopcorn.app/Contents/MacOS/BluePopcorn</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/path/to/imessagarr</string>
+    <string>/path/to/bluepopcorn</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -29,10 +29,10 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/path/to/imessagarr/imessagarr.log</string>
+    <string>/path/to/bluepopcorn/bluepopcorn.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/path/to/imessagarr/imessagarr.log</string>
+    <string>/path/to/bluepopcorn/bluepopcorn.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

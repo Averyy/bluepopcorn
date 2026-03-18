@@ -8,13 +8,13 @@ Quick-reference for iMessage automation on macOS. Verified against the open-sour
 - **Typing indicator:** System Events keystroke into compose field via `imessage://` URL. Requires Accessibility. 10s script execution timeout; native indicator persists ~60s on recipient's end. Only 3 projects implement this (us, BlueBubbles Private API, CaptainATW).
 - **chat.db dates:** Nanoseconds since 2001-01-01 (Core Foundation epoch) on macOS 10.13+. Plain seconds on older versions. imessage-exporter auto-detects: `if stamp >= 1_000_000_000_000` then nanoseconds, else seconds.
 - **attributedBody:** Typedstream (NSArchiver format) fallback when `text` is NULL. NOT a binary plist. Extract via NSString marker + UTF-8 decode. Full deserialization requires a typedstream library (Rust: crabstep, JS: node-typedstream, Python: none mature).
-- **launchd:** `iMessagarr` Swift wrapper for macOS permission naming. FDA/Accessibility go to the compiled binary, not sshd-keygen-wrapper or Python.
+- **launchd:** `BluePopcorn` Swift wrapper for macOS permission naming. FDA/Accessibility go to the compiled binary, not sshd-keygen-wrapper or Python.
 - **Attachment sandbox:** Images must be in `~/Pictures/` for Messages.app to send them. imsg uses `~/Library/Messages/Attachments/imsg/` instead — both work, anything under `$HOME` that Messages.app can access.
-- **Daemon reload:** `launchctl unload ~/Library/LaunchAgents/com.imessagarr.daemon.plist && sleep 2 && lsof -ti:8095 | xargs kill 2>/dev/null && launchctl load ~/Library/LaunchAgents/com.imessagarr.daemon.plist`
+- **Daemon reload:** `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist`
 
 ## Potential Improvements
 
-Techniques from other projects that could improve iMessagarr:
+Techniques from other projects that could improve BluePopcorn:
 
 ### Error dialog clearing (from CamHenlin/imessageclient)
 AppleScript send failures can leave modal error dialogs in Messages.app that block ALL future sends. We retry with backoff but never clear the dialog. Add a dismiss-dialog step in the retry path. See `todo-futureimprovements.md` for full approach.

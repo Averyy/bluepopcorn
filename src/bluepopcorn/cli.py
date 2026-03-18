@@ -24,11 +24,6 @@ async def cli_mode() -> None:
 
     await db.init()
 
-    try:
-        await seerr.authenticate()
-    except Exception as e:
-        print(f"Warning: Seerr auth failed ({e}), search/request won't work")
-
     executor = ActionExecutor(
         seerr=seerr,
         llm=llm,
@@ -41,7 +36,7 @@ async def cli_mode() -> None:
     # Clear CLI user history on start
     await db.clear_history(CLI_SENDER)
 
-    print("iMessagarr CLI mode. Type messages, Ctrl+C to quit.\n")
+    print("BluePopcorn CLI mode. Type messages, Ctrl+C to quit.\n")
 
     try:
         while True:

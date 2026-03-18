@@ -1,4 +1,4 @@
-# iMessagarr
+# BluePopcorn
 
 iMessage bot for Seerr media requests, weather, and more. Runs on a Mac Mini, uses Claude Haiku for natural language understanding.
 
@@ -42,7 +42,7 @@ iMessage (chat.db poll) → Python daemon → claude -p (Haiku) → structured J
                                                            (Seerr API, weather, posters)
 ```
 
-Single async Python daemon. One LLM call per message — Haiku returns a structured JSON decision (`{"action": "search", "query": "severance"}`), Python executes the API calls and formats the response. No second LLM call for formatting.
+Single async Python daemon. Two LLM calls per message — Haiku returns a structured JSON decision (call 1: `{"action": "search", "query": "severance"}`), Python executes the API call, then Haiku crafts the natural-language response using the results as context (call 2). Python formats directly only as a fallback if call 2 fails.
 
 ### How It Works
 - **Conversation history**: 20-entry sliding window per user, auto-clears after 1h gap
@@ -64,14 +64,14 @@ Single async Python daemon. One LLM call per message — Haiku returns a structu
 
 ### Prerequisites
 - Mac with iMessage signed in (bot Apple ID)
-- Full Disk Access + Accessibility permissions for the `iMessagarr` binary
+- Full Disk Access + Accessibility permissions for the `BluePopcorn` binary
 - Seerr instance with a local bot user
 - Claude Code CLI installed and authenticated
 
 ### Install
 ```bash
 git clone <repo>
-cd imessagarr
+cd bluepopcorn
 cp .env.example .env  # Fill in credentials
 uv sync
 ```
@@ -84,43 +84,43 @@ uv sync
 
 ### Run
 ```bash
-uv run -m imessagarr --cli      # CLI test mode (no iMessage)
-uv run -m imessagarr --digest   # One-shot morning digest
-uv run -m imessagarr            # Daemon (production)
+uv run -m bluepopcorn --cli      # CLI test mode (no iMessage)
+uv run -m bluepopcorn --digest   # One-shot morning digest
+uv run -m bluepopcorn            # Daemon (production)
 ```
 
 ### Auto-start (launchd)
 ```bash
-swiftc -o iMessagarr.app/Contents/MacOS/iMessagarr wrapper.swift
-codesign --force --sign - iMessagarr.app
+swiftc -o BluePopcorn.app/Contents/MacOS/BluePopcorn wrapper.swift
+codesign --force --sign - BluePopcorn.app
 
-cp com.imessagarr.daemon.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist
+cp com.bluepopcorn.daemon.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist
 ```
 
 **Permissions** — both must be added manually (no automatic prompts):
-1. System Settings → Privacy & Security → **Full Disk Access** → `+` → select `iMessagarr.app` (required for reading chat.db)
-2. System Settings → Privacy & Security → **Accessibility** → `+` → select `iMessagarr.app` (required for typing indicators)
+1. System Settings → Privacy & Security → **Full Disk Access** → `+` → select `BluePopcorn.app` (required for reading chat.db)
+2. System Settings → Privacy & Security → **Accessibility** → `+` → select `BluePopcorn.app` (required for typing indicators)
 
-After recompiling, remove and re-add `iMessagarr.app` in both lists (the code signature changes).
+After recompiling, remove and re-add `BluePopcorn.app` in both lists (the code signature changes).
 
 ## Project Structure
 
 ```
-imessagarr/
+bluepopcorn/
   .env                    # Secrets (gitignored)
   config.toml             # Non-secret settings
   personality.md          # Bot tone (→ LLM system prompt)
   instructions.md         # Action routing (→ LLM system prompt)
   memory.md               # Global bot context (→ LLM system prompt)
-  wrapper.swift           # Swift wrapper (compiled into iMessagarr.app bundle)
-  iMessagarr.app/         # macOS app bundle (binary gitignored, Info.plist tracked)
-  src/imessagarr/
+  wrapper.swift           # Swift wrapper (compiled into BluePopcorn.app bundle)
+  BluePopcorn.app/        # macOS app bundle (binary gitignored, Info.plist tracked)
+  src/bluepopcorn/
     __main__.py           # Entry point, daemon loop
     config.py             # Settings from .env + config.toml
     types.py              # Dataclasses, enums, JSON schema
     llm.py                # claude -p subprocess wrapper
-    actions.py            # Action dispatch + response formatting
+    actions/              # Action dispatch + handler package (search, request, status, etc.)
     seerr.py              # Seerr API client (search, request, discover, ratings)
     weather.py            # Weather (Open-Meteo) + pollen (Aerobiology)
     morning_digest.py     # Daily digest (composes weather + seerr)

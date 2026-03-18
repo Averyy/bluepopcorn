@@ -59,10 +59,6 @@ class SeerrConnectionError(SeerrError):
     """HTTP connection failed or timed out."""
 
 
-class SeerrAuthError(SeerrError):
-    """Authentication failed after retry."""
-
-
 class SeerrSearchError(SeerrError):
     """Search query returned an error (e.g. 400 bad query)."""
 
@@ -70,46 +66,20 @@ class SeerrSearchError(SeerrError):
 class SeerrClient:
     def __init__(self, settings: Settings) -> None:
         self.base_url = settings.seerr_url.rstrip("/")
-        self.email = settings.seerr_email
-        self.password = settings.seerr_password
-        self.client = httpx.AsyncClient(timeout=settings.http_timeout)
-        self._cookie: str | None = None
-        self._auth_lock = asyncio.Lock()
+        self.client = httpx.AsyncClient(
+            timeout=settings.http_timeout,
+            headers={"X-Api-Key": settings.seerr_api_key},
+        )
         # Dynamic genre maps, loaded lazily
         self._genre_map_movie: dict[str, int] | None = None
         self._genre_map_tv: dict[str, int] | None = None
 
-    async def authenticate(self) -> None:
-        """Authenticate with Seerr and store session cookie."""
-        log.info("Authenticating with Seerr at %s", self.base_url)
-        try:
-            resp = await self.client.post(
-                f"{self.base_url}/api/v1/auth/local",
-                json={"email": self.email, "password": self.password},
-            )
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
-            raise SeerrConnectionError(f"Connection failed: {e}") from e
-        resp.raise_for_status()
-        cookie = resp.cookies.get("connect.sid")
-        if cookie:
-            self._cookie = cookie
-            self.client.cookies.set("connect.sid", cookie)
-            log.info("Seerr authentication successful")
-        else:
-            raise SeerrAuthError("No session cookie returned from Seerr auth")
-
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Make an authenticated request, re-auth on 401 or missing session.
+        """Make an API-key-authenticated request.
 
         Uses %20 encoding for query params instead of httpx's default +.
         Seerr 3.x rejects + as space encoding.
         """
-        # Authenticate lazily if we never got a session cookie
-        if not self._cookie:
-            async with self._auth_lock:
-                if not self._cookie:  # Double-check after acquiring lock
-                    await self.authenticate()
-
         # Build URL with %20 encoding for params
         url = f"{self.base_url}{path}"
         params = kwargs.pop("params", None)
@@ -125,24 +95,6 @@ class SeerrClient:
         except httpx.TimeoutException as e:
             log.error("Request timeout: %s %s after %ss — %s", method, path, self.client.timeout.connect, e)
             raise SeerrConnectionError(f"Timeout ({method} {path}): {e}") from e
-
-        if resp.status_code == 401:
-            log.warning("401 on %s %s (has_cookie=%s), re-authenticating", method, path, bool(self._cookie))
-            async with self._auth_lock:
-                try:
-                    await self.authenticate()
-                except SeerrConnectionError:
-                    raise
-                except Exception as e:
-                    raise SeerrAuthError(f"Re-authentication failed: {e}") from e
-            try:
-                resp = await self.client.request(method, url, **kwargs)
-            except httpx.ConnectError as e:
-                log.error("Seerr connect failed after re-auth: %s %s — %s", method, path, e)
-                raise SeerrConnectionError(f"Connect failed after re-auth ({method} {path}): {e}") from e
-            except httpx.TimeoutException as e:
-                log.error("Seerr timeout after re-auth: %s %s — %s", method, path, e)
-                raise SeerrConnectionError(f"Timeout after re-auth ({method} {path}): {e}") from e
 
         if resp.status_code >= 400 and resp.status_code != 404:
             log.error("HTTP %d on %s %s: %s", resp.status_code, method, path, resp.text[:200])
@@ -288,7 +240,7 @@ class SeerrClient:
             if e.response.status_code != 400:
                 raise SeerrSearchError(f"Search failed: {e}") from e
             log.warning("Search returned 400, trying fallback queries")
-        except (SeerrConnectionError, SeerrAuthError):
+        except SeerrConnectionError:
             raise
 
         # Fallback chain for 400 errors: no special chars → first 3 words → first 2 words
@@ -375,14 +327,6 @@ class SeerrClient:
         log.info("Fetching processing requests")
         resp = await self._request(
             "GET", "/api/v1/request", params={"filter": "processing"}
-        )
-        data = resp.json()
-        return data.get("results", [])
-
-    async def get_recent_available(self) -> list[dict]:
-        """Get recently available media."""
-        resp = await self._request(
-            "GET", "/api/v1/request", params={"filter": "available", "take": 5}
         )
         data = resp.json()
         return data.get("results", [])

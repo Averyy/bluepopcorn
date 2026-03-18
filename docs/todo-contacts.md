@@ -54,7 +54,7 @@ Injected after the `<context>` time tag in `_build_prompt()`. Only fields with v
 
 ## Implementation
 
-### New: `src/imessagarr/contacts.py`
+### New: `src/bluepopcorn/contacts.py`
 
 ```python
 @dataclass
@@ -138,7 +138,7 @@ Normalize to E.164 (`+15551234567`):
 
 Applied to contact phones when building the dict AND to the incoming chat.db phone when looking up. Both sides normalized = simple dict lookup, no multi-format fallback needed.
 
-### Modify: `src/imessagarr/monitor.py`
+### Modify: `src/bluepopcorn/monitor.py`
 
 The inbound filter currently checks `self.allowed_senders` (a set of phones from `.env`). Change to:
 
@@ -153,30 +153,30 @@ elif sender not in self.allowed_senders:
 
 Accept `ContactResolver` in constructor. Call `refresh_if_stale()` at the start of each poll cycle.
 
-### Modify: `src/imessagarr/actions.py`
+### Modify: `src/bluepopcorn/actions/` package
 
-- Accept `ContactResolver` in `ActionExecutor.__init__()`
-- In `_build_prompt()`, after time context, inject `contact.to_prompt_block()` if available
+- Accept `ContactResolver` in `ActionExecutor.__init__()` (`actions/__init__.py`)
+- In `_build_prompt()`, after time context, inject `contact.to_prompt_block()` if available (`actions/_base.py` or wherever `_build_prompt` lives)
 - Use display name in log messages
 
-### Modify: `src/imessagarr/__main__.py`
+### Modify: `src/bluepopcorn/__main__.py`
 
 - Initialize `ContactResolver`, call `load_all()` at startup
 - Add `_check_contacts_permission()` (same pattern as `_check_accessibility()`)
 - Pass resolver to `MessageMonitor` and `ActionExecutor`
 - Log display names: "IN Avery: ..." instead of "IN +15551234567: ..."
 
-### Modify: `src/imessagarr/config.py`
+### Modify: `src/bluepopcorn/config.py`
 
 - Make `allowed_senders` validation a warning instead of a hard error (empty is OK when contacts works)
 
-### Modify: `src/imessagarr/types.py`
+### Modify: `src/bluepopcorn/types.py`
 
 - Add `sender_name: str | None = None` to `IncomingMessage`
 
 ## Permission Model
 
-- iMessagarr.app needs **Contacts** permission in System Settings → Privacy & Security → Contacts
+- BluePopcorn.app needs **Contacts** permission in System Settings → Privacy & Security → Contacts
 - First AppleScript call to Contacts.app triggers the permission dialog
 - `_check_contacts_permission()` at startup: run a simple query, log result
 - If denied: `_available = False`, fall back to `ALLOWED_SENDERS` only, log warning. Bot works normally, just no names or enrichment
@@ -202,7 +202,7 @@ Accept `ContactResolver` in constructor. Call `refresh_if_stale()` at the start 
 5. `config.py` — make `allowed_senders` optional (warning, not error)
 
 ### Phase 2: Prompt Enrichment
-6. `actions.py` — inject `<contact>` block into `_build_prompt()`, display names in logs
+6. `actions/` — inject `<contact>` block into `_build_prompt()`, display names in logs
 7. Test: verify the LLM uses the contact's name naturally
 
 ## Verification

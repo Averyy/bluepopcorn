@@ -11,11 +11,9 @@ from dotenv import dotenv_values
 class Settings:
     # Seerr
     seerr_url: str
-    seerr_email: str
-    seerr_password: str
+    seerr_api_key: str
 
     # Bot
-    bot_apple_id: str
     allowed_senders: list[str]
 
     # LLM
@@ -37,10 +35,10 @@ class Settings:
     timezone: str = "America/Toronto"
 
     # Paths
-    poster_dir: str = "~/Pictures/imessagarr"
-    db_path: str = "~/.local/share/imessagarr/bot.db"
+    poster_dir: str = "~/Pictures/bluepopcorn"
+    db_path: str = "~/.local/share/bluepopcorn/bot.db"
     chat_db_path: str = "~/Library/Messages/chat.db"
-    log_path: str = "imessagarr.log"
+    log_path: str = "bluepopcorn.log"
 
     # Messages
     max_message_length: int = 1200
@@ -81,9 +79,7 @@ def load_settings(
 
     # Required env vars
     seerr_url = env.get("SEERR_URL", "")
-    seerr_email = env.get("SEERR_EMAIL", "")
-    seerr_password = env.get("SEERR_PASSWORD", "")
-    bot_apple_id = env.get("BOT_APPLE_ID", "")
+    seerr_api_key = env.get("SEERR_API_KEY", "")
     allowed_raw = env.get("ALLOWED_SENDERS", "")
     allowed_senders = [s.strip() for s in allowed_raw.split(",") if s.strip()]
 
@@ -102,12 +98,8 @@ def load_settings(
     missing = []
     if not seerr_url:
         missing.append("SEERR_URL")
-    if not seerr_email:
-        missing.append("SEERR_EMAIL")
-    if not seerr_password:
-        missing.append("SEERR_PASSWORD")
-    if not bot_apple_id:
-        missing.append("BOT_APPLE_ID")
+    if not seerr_api_key:
+        missing.append("SEERR_API_KEY")
     if not allowed_senders:
         missing.append("ALLOWED_SENDERS")
     if missing:
@@ -115,9 +107,7 @@ def load_settings(
 
     return Settings(
         seerr_url=seerr_url,
-        seerr_email=seerr_email,
-        seerr_password=seerr_password,
-        bot_apple_id=bot_apple_id,
+        seerr_api_key=seerr_api_key,
         allowed_senders=allowed_senders,
         model=llm.get("model", "haiku"),
         fallback_model=llm.get("fallback_model", "sonnet"),
@@ -129,10 +119,10 @@ def load_settings(
         longitude=location.get("longitude", -79.2469),
         location_name=location.get("name", "St. Catharines"),
         timezone=location.get("timezone", "America/Toronto"),
-        poster_dir=paths.get("poster_dir", "~/Pictures/imessagarr"),
-        db_path=paths.get("db_path", "~/.local/share/imessagarr/bot.db"),
+        poster_dir=paths.get("poster_dir", "~/Pictures/bluepopcorn"),
+        db_path=paths.get("db_path", "~/.local/share/bluepopcorn/bot.db"),
         chat_db_path=paths.get("chat_db_path", "~/Library/Messages/chat.db"),
-        log_path=paths.get("log_path", "imessagarr.log"),
+        log_path=paths.get("log_path", "bluepopcorn.log"),
         max_message_length=messages.get("max_length", 1200),
         history_window=messages.get("history_window", 20),
         history_gap_hours=messages.get("history_gap_hours", 1.0),

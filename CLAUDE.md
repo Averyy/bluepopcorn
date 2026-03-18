@@ -1,4 +1,4 @@
-# iMessagarr
+# BluePopcorn
 
 iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 
@@ -8,7 +8,7 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **ALWAYS use `--tools ""`** with `claude -p` -- disables all built-in tools
 - **NEVER use `--resume`** -- breaks `--json-schema`. Every call is fresh with history packed in
 - **`--append-system-prompt-file` does NOT exist** -- only `--append-system-prompt` (inline string)
-- **Poster images must be in `~/Pictures/imessagarr/`** -- Messages.app sandbox, other dirs silently fail
+- **Poster images must be in `~/Pictures/bluepopcorn/`** -- Messages.app sandbox, other dirs silently fail
 - **Secrets in `.env` only** -- never hardcode credentials or phone numbers
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
 - **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
@@ -18,18 +18,18 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 
 ```bash
 uv sync                              # Install deps
-uv run -m imessagarr --cli           # CLI test mode
-uv run -m imessagarr --digest        # One-shot digest
-uv run -m imessagarr                 # Run daemon
+uv run -m bluepopcorn --cli           # CLI test mode
+uv run -m bluepopcorn --digest        # One-shot digest
+uv run -m bluepopcorn                 # Run daemon
 
 # Restart daemon (for Python code changes — NO rebuild needed)
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist   # Stop
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.imessagarr.daemon.plist # Start
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist   # Stop
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist # Start
 
 # Rebuild wrapper (ONLY if wrapper.swift or Info.plist change — rare)
 # WARNING: rebuilding revokes FDA/Accessibility, must re-grant in System Settings
-swiftc -o iMessagarr.app/Contents/MacOS/iMessagarr wrapper.swift  # Build macOS wrapper
-codesign --force --sign - iMessagarr.app                          # Ad-hoc sign
+swiftc -o BluePopcorn.app/Contents/MacOS/BluePopcorn wrapper.swift  # Build macOS wrapper
+codesign --force --sign - BluePopcorn.app                          # Ad-hoc sign
 ```
 
 ## Key References
@@ -56,15 +56,15 @@ Each external service is its own module:
 - `seerr.py` -- Seerr API client (search, request, discover, ratings, genres)
 - `weather.py` -- Weather (Open-Meteo) + pollen (Aerobiology) as standalone functions
 - `morning_digest.py` -- Composes weather + seerr for daily digest message
-- `actions.py` -- Action dispatch + all response formatting
+- `actions/` -- Action dispatch + handler package (search, request, status, weather, recent, recommend, memory)
 - Adding a new service = new file + new handler in actions.py
 
 ## Seerr Integration
 
-- Auth: session cookie via `POST /api/v1/auth/local`, NOT API key
+- Auth: `X-Api-Key` header (set on httpx client from `SEERR_API_KEY` env var)
 - URL encoding: must use `%20` not `+` for spaces (Seerr 3.x rejects `+`)
 - Genres: loaded dynamically from `/api/v1/genres/movie` and `/api/v1/genres/tv`, cached
-- Custom exceptions: `SeerrConnectionError`, `SeerrAuthError`, `SeerrSearchError`
+- Custom exceptions: `SeerrConnectionError`, `SeerrSearchError`
 - Request dedup: checks media status before POSTing to avoid duplicates
 - MediaStatus enum: NOT_TRACKED=0, UNKNOWN=1, PENDING=2, PROCESSING=3, PARTIALLY_AVAILABLE=4, AVAILABLE=5, BLOCKLISTED=6, DELETED=7
 - RequestStatus enum: PENDING_APPROVAL=1, APPROVED=2, DECLINED=3, FAILED=4, COMPLETED=5
