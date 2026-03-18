@@ -19,8 +19,11 @@ async def handle_recent(
     """Check recently added media and pending requests."""
     try:
         lines: list[str] = []
-        # Recently added to library
-        added = await executor.seerr.get_recently_added(take=5)
+        # Fetch recently added and pending in parallel
+        added, pending = await asyncio.gather(
+            executor.seerr.get_recently_added(take=5),
+            executor.seerr.get_pending(),
+        )
         if added:
             movies = [r["title"] for r in added if r["mediaType"] == "movie"]
             shows = [r["title"] for r in added if r["mediaType"] == "tv"]
@@ -28,8 +31,6 @@ async def handle_recent(
                 lines.append("Recently added movies: " + ", ".join(movies))
             if shows:
                 lines.append("Recently added shows: " + ", ".join(shows))
-        # Pending requests
-        pending = await executor.seerr.get_pending()
         if pending:
             resolved = await asyncio.gather(
                 *[resolve_request_title(req, executor.seerr) for req in pending[:5]]

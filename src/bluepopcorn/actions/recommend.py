@@ -103,7 +103,8 @@ async def handle_recommend(
     try:
         movie_genres = await executor.seerr.get_genre_map("movie")
         tv_genres = await executor.seerr.get_genre_map("tv")
-    except Exception:
+    except Exception as e:
+        log.warning("Genre map fetch failed, recommendations may miss genre filters: %s", e)
         movie_genres = {}
         tv_genres = {}
 

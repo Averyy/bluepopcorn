@@ -34,7 +34,7 @@ def format_search_results(results: list[SearchResult]) -> str:
     for i, r in enumerate(results, 1):
         year_str = f" ({r.year})" if r.year else ""
         type_str = "TV" if r.media_type == "tv" else "Movie"
-        overview = r.overview[:150] if r.overview else "No description"
+        overview = r.overview[:80] if r.overview else "No description"
         rating_str = f" Rating: {r.rating}/10" if r.rating else ""
         # Append RT and IMDB ratings when available
         ext_ratings: list[str] = []
@@ -46,9 +46,10 @@ def format_search_results(results: list[SearchResult]) -> str:
         if ext_rating_str:
             rating_str += f" | {ext_rating_str}" if rating_str else f" {ext_rating_str}"
         trailer_str = f" Trailer: {r.trailer_url}" if r.trailer_url else ""
+        air_date_str = f" | Air date: {r.next_air_date}" if r.next_air_date else ""
         lines.append(
             f"{i}. {r.title}{year_str} [{type_str}] tmdb:{r.tmdb_id} "
-            f"- {overview} (Status: {r.status_label}){rating_str}{trailer_str}"
+            f"- {overview} (Status: {r.status_label}){rating_str}{air_date_str}{trailer_str}"
         )
     lines.append("]")
     return "\n".join(lines)
@@ -70,8 +71,9 @@ async def resolve_request_title(req: dict, seerr: SeerrClient) -> str:
                 title = seerr_title(detail, default="")
                 if title:
                     return title
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Title lookup failed for %s/%s, falling back to slug: %s",
+                      media_type, tmdb_id, e)
     # Last resort fallback
     slug = media.get("externalServiceSlug", "")
     if slug and not slug.isdigit():

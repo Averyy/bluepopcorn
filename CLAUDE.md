@@ -21,8 +21,10 @@ uv sync                              # Install deps
 uv run -m bluepopcorn --cli           # CLI test mode
 uv run -m bluepopcorn --digest        # One-shot digest
 uv run -m bluepopcorn                 # Run daemon
+./restart.sh                          # Restart daemon after Python changes
+tail -30 bluepopcorn.log              # Recent logs (adjust count as needed)
 
-# Restart daemon (for Python code changes — NO rebuild needed)
+# Manual restart (restart.sh does this for you)
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist   # Stop
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist # Start
 

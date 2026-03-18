@@ -270,13 +270,20 @@ class SeerrClient:
 
         raise SeerrSearchError(f"All search attempts failed for: {query}")
 
-    async def request_media(self, media_type: str, tmdb_id: int) -> dict:
-        """Request a movie or TV show on Seerr."""
+    async def request_media(
+        self, media_type: str, tmdb_id: int, *, seasons: list[int] | None = None
+    ) -> dict:
+        """Request a movie or TV show on Seerr.
+
+        For TV, pass pre-fetched ``seasons`` to avoid a redundant detail call.
+        If omitted, seasons are fetched automatically.
+        """
         log.info("Seerr request: %s tmdb:%d", media_type, tmdb_id)
         payload: dict[str, Any] = {"mediaType": media_type, "mediaId": tmdb_id}
         if media_type == "tv":
             # Explicitly pass season numbers — omitting seasons crashes some shows
-            seasons = await self._get_season_numbers(tmdb_id)
+            if not seasons:
+                seasons = await self._get_season_numbers(tmdb_id)
             if not seasons:
                 raise SeerrError(f"Could not fetch season info for tv/{tmdb_id}")
             payload["seasons"] = seasons
@@ -290,14 +297,19 @@ class SeerrClient:
         try:
             resp = await self._request("GET", f"/api/v1/tv/{tmdb_id}")
             data = resp.json()
-            return [
-                s["seasonNumber"]
-                for s in data.get("seasons", [])
-                if s.get("seasonNumber", 0) > 0
-            ]
+            return self.extract_season_numbers(data)
         except Exception as e:
             log.warning("Failed to fetch seasons for tv/%d: %s", tmdb_id, e)
             return []
+
+    @staticmethod
+    def extract_season_numbers(detail: dict) -> list[int]:
+        """Extract season numbers from a TV detail dict, excluding specials."""
+        return [
+            s["seasonNumber"]
+            for s in detail.get("seasons", [])
+            if s.get("seasonNumber", 0) > 0
+        ]
 
     async def get_media_status(self, media_type: str, tmdb_id: int) -> dict | None:
         """Get current status of a media item. Returns detail dict or None."""
@@ -382,23 +394,71 @@ class SeerrClient:
             log.debug("Ratings lookup failed for %s/%d: %s", media_type, tmdb_id, e)
             return {}
 
-    async def get_trailer(self, media_type: str, tmdb_id: int) -> str | None:
-        """Get a YouTube trailer/teaser URL for a movie or TV show."""
+    async def get_detail_extras(
+        self, media_type: str, tmdb_id: int
+    ) -> dict[str, str | None]:
+        """Fetch trailer, air date, and download progress from a single detail call.
+
+        Returns {"trailer": ..., "air_date": ..., "download_progress": ...}
+        with None for missing values.
+        """
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             data = resp.json()
-            for video in data.get("relatedVideos", []):
-                if video.get("site") == "YouTube" and video.get("type") in ("Trailer", "Teaser"):
-                    # Prefer the full url field if available, fall back to building from key
-                    url = video.get("url")
-                    if url:
-                        return url
-                    key = video.get("key")
-                    if key:
-                        return f"https://youtu.be/{key}"
+            media_info = data.get("mediaInfo") or {}
+            return {
+                "trailer": self._extract_trailer(data),
+                "air_date": self._extract_air_date(data, media_type),
+                "download_progress": parse_download_progress(media_info),
+            }
         except Exception as e:
-            log.debug("Trailer lookup failed for %s/%d: %s", media_type, tmdb_id, e)
+            log.debug("Detail extras failed for %s/%d: %s", media_type, tmdb_id, e)
+            return {"trailer": None, "air_date": None, "download_progress": None}
+
+    @staticmethod
+    def _extract_trailer(data: dict) -> str | None:
+        for video in data.get("relatedVideos", []):
+            if video.get("site") == "YouTube" and video.get("type") in ("Trailer", "Teaser"):
+                url = video.get("url")
+                if url:
+                    return url
+                key = video.get("key")
+                if key:
+                    return f"https://youtu.be/{key}"
         return None
+
+    @staticmethod
+    def _extract_air_date(data: dict, media_type: str) -> str | None:
+        """Extract air/release date from detail data.
+
+        Returns a human-readable string, e.g.:
+          TV airing:  "S2E5 airs 2026-03-20"
+          TV ended:   "Ended - last ep S3E10 aired 2025-05-10"
+          TV canceled:"Canceled"
+          Movie:      "2026-07-04"
+        Returns None if no date is available.
+        """
+        if media_type == "tv":
+            next_ep = data.get("nextEpisodeToAir")
+            if next_ep and next_ep.get("airDate"):
+                season = next_ep.get("seasonNumber", "?")
+                ep = next_ep.get("episodeNumber", "?")
+                return f"S{season}E{ep} airs {next_ep['airDate']}"
+            next_date = data.get("nextAirDate")
+            if next_date:
+                return f"Next episode airs {next_date}"
+            status = data.get("status", "")
+            last_ep = data.get("lastEpisodeToAir")
+            if status in ("Ended", "Canceled", "Cancelled"):
+                if last_ep and last_ep.get("airDate"):
+                    s = last_ep.get("seasonNumber", "?")
+                    e = last_ep.get("episodeNumber", "?")
+                    return f"{status} - last ep S{s}E{e} aired {last_ep['airDate']}"
+                return status
+            return None
+        else:
+            release = data.get("releaseDate", "")
+            return release or None
 
     async def get_recently_added(self, take: int = 5) -> list[dict]:
         """Get media recently added to the library with resolved titles (concurrent)."""
@@ -549,38 +609,11 @@ class SeerrClient:
         exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Discover movies by genre and/or year."""
-        params: dict[str, Any] = {
-            "sortBy": "popularity.desc",
-            "voteCountGte": 50,
-            "language": "en",
-        }
-        if genre_id is not None:
-            params["genre"] = str(genre_id)
-        if year is not None:
-            params["primaryReleaseDateGte"] = f"{year}-01-01"
-            end = year_end or year
-            params["primaryReleaseDateLte"] = f"{end}-12-31"
-        log.info("Seerr discover movies: genre=%s year=%s", genre_id, year)
-        results: list[SearchResult] = []
-        for page in range(1, 6):
-            params["page"] = page
-            try:
-                resp = await self._request("GET", "/api/v1/discover/movies", params=params)
-            except Exception as e:
-                if page == 1:
-                    raise
-                log.debug("Discover movies page %d failed: %s", page, e)
-                break
-            data = resp.json()
-            batch = self._parse_results(
-                data.get("results", []), take - len(results),
-                filter_lang_year=True, min_votes=10, exclude_ids=exclude_ids,
-            )
-            results.extend(batch)
-            if len(results) >= take or page >= data.get("totalPages", 1):
-                break
-        log.info("Seerr discover movies returned %d results", len(results))
-        return results[:take]
+        date_params = ("primaryReleaseDateGte", "primaryReleaseDateLte")
+        return await self._discover_paginated(
+            "movies", date_params, genre_id=genre_id, year=year,
+            year_end=year_end, take=take, exclude_ids=exclude_ids,
+        )
 
     async def discover_tv(
         self, genre_id: int | None = None, year: int | None = None,
@@ -588,6 +621,19 @@ class SeerrClient:
         exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Discover TV shows by genre and/or year."""
+        date_params = ("firstAirDateGte", "firstAirDateLte")
+        return await self._discover_paginated(
+            "tv", date_params, genre_id=genre_id, year=year,
+            year_end=year_end, take=take, exclude_ids=exclude_ids,
+        )
+
+    async def _discover_paginated(
+        self, media_type: str, date_params: tuple[str, str], *,
+        genre_id: int | None = None, year: int | None = None,
+        year_end: int | None = None, take: int = 5,
+        exclude_ids: set[int] | None = None,
+    ) -> list[SearchResult]:
+        """Shared paginated discovery for movies and TV."""
         params: dict[str, Any] = {
             "sortBy": "popularity.desc",
             "voteCountGte": 50,
@@ -596,19 +642,21 @@ class SeerrClient:
         if genre_id is not None:
             params["genre"] = str(genre_id)
         if year is not None:
-            params["firstAirDateGte"] = f"{year}-01-01"
+            params[date_params[0]] = f"{year}-01-01"
             end = year_end or year
-            params["firstAirDateLte"] = f"{end}-12-31"
-        log.info("Seerr discover tv: genre=%s year=%s", genre_id, year)
+            params[date_params[1]] = f"{end}-12-31"
+        log.info("Seerr discover %s: genre=%s year=%s", media_type, genre_id, year)
         results: list[SearchResult] = []
         for page in range(1, 6):
             params["page"] = page
             try:
-                resp = await self._request("GET", "/api/v1/discover/tv", params=params)
+                resp = await self._request(
+                    "GET", f"/api/v1/discover/{media_type}", params=params
+                )
             except Exception as e:
                 if page == 1:
                     raise
-                log.debug("Discover tv page %d failed: %s", page, e)
+                log.debug("Discover %s page %d failed: %s", media_type, page, e)
                 break
             data = resp.json()
             batch = self._parse_results(
@@ -618,7 +666,7 @@ class SeerrClient:
             results.extend(batch)
             if len(results) >= take or page >= data.get("totalPages", 1):
                 break
-        log.info("Seerr discover tv returned %d results", len(results))
+        log.info("Seerr discover %s returned %d results", media_type, len(results))
         return results[:take]
 
     async def close(self) -> None:

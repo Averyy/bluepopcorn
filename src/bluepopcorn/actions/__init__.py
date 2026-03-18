@@ -11,9 +11,9 @@ from ..config import Settings
 from ..db import BotDatabase
 from ..llm import LLMClient
 from ..posters import PosterHandler
-from ..seerr import SeerrClient, parse_download_progress
+from ..seerr import SeerrClient
 from ..sender import MessageSender
-from ..types import Action, LLMDecision, MediaStatus, SearchResult
+from ..types import Action, LLMDecision, SearchResult
 from ._base import ERROR_GENERIC, StatusData, resolve_request_title, apply_ratings
 
 # Handler imports
@@ -240,22 +240,23 @@ class ActionExecutor:
     async def _enrich_results(
         self, results: list[SearchResult], *, enrich_downloads: bool = False
     ) -> None:
-        """Fetch trailers, ratings, and optionally download progress for top results."""
+        """Fetch trailers, ratings, air dates, and optionally download progress for top results."""
         top = results[:3]
-        trailer_tasks = [self.seerr.get_trailer(r.media_type, r.tmdb_id) for r in top]
+        detail_tasks = [self.seerr.get_detail_extras(r.media_type, r.tmdb_id) for r in top]
         rating_tasks = [self.seerr.get_ratings(r.media_type, r.tmdb_id) for r in top]
-        progress_tasks = []
-        if enrich_downloads:
-            progress_tasks = [
-                self._enrich_download_progress(r) for r in top
-                if r.status == MediaStatus.PROCESSING and not r.download_progress
-            ]
-        all_results = await asyncio.gather(*trailer_tasks, *rating_tasks, *progress_tasks)
-        trailers = all_results[:len(top)]
-        ratings = all_results[len(top):len(top) * 2]
-        for i, trailer_url in enumerate(trailers):
-            if trailer_url and i < len(results):
-                results[i].trailer_url = trailer_url
+        n = len(top)
+        all_results = await asyncio.gather(*detail_tasks, *rating_tasks)
+        details = all_results[:n]
+        ratings = all_results[n:n * 2]
+        for i, extras in enumerate(details):
+            if i >= len(results):
+                break
+            if extras.get("trailer"):
+                results[i].trailer_url = extras["trailer"]
+            if extras.get("air_date"):
+                results[i].next_air_date = extras["air_date"]
+            if enrich_downloads and extras.get("download_progress"):
+                results[i].download_progress = extras["download_progress"]
         for i, rating_dict in enumerate(ratings):
             if rating_dict and i < len(results):
                 apply_ratings(results[i], rating_dict)
@@ -333,20 +334,6 @@ class ActionExecutor:
             await self._send_single_poster(phone, results[0])
         await self.sender.start_typing(phone)
         return results
-
-    async def _enrich_download_progress(self, result: SearchResult) -> None:
-        """Fetch download progress from the detail endpoint for a PROCESSING result."""
-        try:
-            detail = await self.seerr.get_media_status(result.media_type, result.tmdb_id)
-            if not detail:
-                return
-            media_info = detail.get("mediaInfo") or {}
-            progress = parse_download_progress(media_info)
-            if progress:
-                result.download_progress = progress
-        except Exception as e:
-            log.debug("Download progress enrichment failed for %s/%d: %s",
-                      result.media_type, result.tmdb_id, e)
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision

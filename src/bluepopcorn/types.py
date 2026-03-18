@@ -78,6 +78,7 @@ class SearchResult:
     rt_rating: str | None = None  # Rotten Tomatoes score (e.g. "97%")
     imdb_rating: str | None = None  # IMDB score (e.g. "8.7")
     download_progress: str | None = None  # e.g. "51%" when actively downloading
+    next_air_date: str | None = None  # e.g. "S2E5 airs 2026-03-20" or "2026-07-04"
 
     @property
     def status_label(self) -> str:
