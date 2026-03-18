@@ -9,5 +9,6 @@ dist/
 *.log.*
 /BluePopcorn
 BluePopcorn.app/Contents/MacOS/BluePopcorn
+BluePopcorn.app/Contents/_CodeSignature/
 com.bluepopcorn.daemon.plist
 data/
