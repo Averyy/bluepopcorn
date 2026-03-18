@@ -48,6 +48,7 @@ async def cli_mode() -> None:
             if not text:
                 continue
 
+            log.info("CLI input: %s", text)
             response = await executor.handle_message(CLI_SENDER, text)
             print(f"Bot: {response}\n")
 

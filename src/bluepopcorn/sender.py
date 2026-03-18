@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from .config import Settings
@@ -13,6 +15,77 @@ log = logging.getLogger(__name__)
 class MessageSender:
     def __init__(self, settings: Settings) -> None:
         self.max_length = settings.max_message_length
+        self._send_lock = asyncio.Lock()
+
+    async def _run_cmd(self, *args: str) -> int:
+        """Run a command silently and return its exit code."""
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        return proc.returncode
+
+    async def _ensure_messages_running(self) -> bool:
+        """Ensure Messages.app is running, launching it if needed.
+
+        Uses pgrep (fast, no side effects) to check, and ``open -g -j -a``
+        to launch without stealing focus. Polls readiness up to 10s.
+        Returns True if Messages is running and responsive.
+        """
+        if await self._run_cmd("pgrep", "-x", "Messages") == 0:
+            return True
+
+        log.warning("Messages.app not running, launching")
+        await self._run_cmd("open", "-g", "-j", "-a", "Messages")
+        for _ in range(10):
+            await asyncio.sleep(1)
+            if await self._run_cmd(
+                "osascript", "-e",
+                'tell application "Messages" to count of accounts',
+            ) == 0:
+                log.info("Messages.app is ready")
+                return True
+        log.error("Messages.app launched but not responding after 10s")
+        return False
+
+    async def _restart_messages(self) -> bool:
+        """Quit and relaunch Messages.app as a last resort for stuck state.
+
+        Returns True if Messages restarted and is responsive.
+        """
+        log.warning("Restarting Messages.app (last-resort recovery)")
+
+        # Try graceful quit first
+        quit_proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", 'tell application "Messages" to quit',
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(quit_proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            quit_proc.kill()
+            await quit_proc.wait()
+
+        # Wait for Messages to exit, fall back to killall
+        for _ in range(5):
+            await asyncio.sleep(1)
+            if await self._run_cmd("pgrep", "-x", "Messages") != 0:
+                break
+        else:
+            log.warning("Messages.app didn't quit gracefully, using killall")
+            await self._run_cmd("killall", "Messages")
+            await asyncio.sleep(2)
+
+        # Relaunch and wait for readiness
+        ready = await self._ensure_messages_running()
+        if ready:
+            log.info("Messages.app restarted successfully")
+        else:
+            log.error("Messages.app failed to restart")
+        return ready
 
     async def _run_applescript(self, script: str, timeout: int = 10) -> tuple[bool, str]:
         """Run an AppleScript and return (success, output)."""
@@ -42,21 +115,6 @@ class MessageSender:
             return False, error
         return True, stdout.decode("utf-8", errors="ignore").strip()
 
-    def _build_send_text_script(self, phone: str, message: str) -> str:
-        """Build AppleScript to send a text message.
-
-        Uses account/participant pattern for macOS Tahoe (26+).
-        """
-        safe_phone = self._sanitize_phone(phone)
-        escaped = self._escape_applescript(message)
-        return f'''
-tell application "Messages"
-    set targetAccount to first account whose service type = iMessage
-    set targetParticipant to participant "{safe_phone}" of targetAccount
-    send "{escaped}" to targetParticipant
-end tell
-'''
-
     def _build_send_image_script(self, phone: str, image_path: str) -> str:
         """Build AppleScript to send an image file.
 
@@ -84,12 +142,44 @@ end tell
         """Escape a string for safe AppleScript interpolation."""
         return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
 
+    async def _send_text_once(self, phone: str, message: str) -> tuple[bool, str]:
+        """Send a text message via a temp file to avoid AppleScript escaping issues.
+
+        Writes the message to a temp file and reads it in AppleScript via
+        ``read (POSIX file ...) as «class utf8»``, so the message content
+        never enters a string literal. Safe for emoji, quotes, backslashes, etc.
+        """
+        safe_phone = self._sanitize_phone(phone)
+        fd, path = tempfile.mkstemp(prefix="bp_msg_", suffix=".txt")
+        try:
+            os.write(fd, message.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            safe_path = self._escape_applescript(path)
+            script = f'''
+set msgText to read (POSIX file "{safe_path}") as «class utf8»
+tell application "Messages"
+    set targetAccount to first account whose service type = iMessage
+    set targetParticipant to participant "{safe_phone}" of targetAccount
+    send msgText to targetParticipant
+end tell
+'''
+            return await self._run_applescript(script)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     async def start_typing(self, phone: str) -> None:
         """Trigger typing indicator by putting text in the compose field.
 
         Uses System Events GUI automation. Requires Accessibility permissions.
-        Best-effort — failures are logged but don't block the bot.
+        Best-effort — skipped if a send is in progress to avoid GUI interference.
         """
+        if self._send_lock.locked():
+            return
         script = f'''
 tell application "Messages" to activate
 delay 0.3
@@ -108,8 +198,10 @@ end tell
     async def stop_typing(self) -> None:
         """Clear the compose field to stop typing indicator.
 
-        Best-effort — failures don't block the bot.
+        Best-effort — skipped if a send is in progress to avoid GUI interference.
         """
+        if self._send_lock.locked():
+            return
         script = '''
 tell application "System Events"
     tell process "Messages"
@@ -122,34 +214,88 @@ end tell
         if ok:
             log.debug("Typing indicator cleared")
 
+    async def _dismiss_error_dialogs(self) -> None:
+        """Best-effort dismissal of modal error dialogs in Messages.app.
+
+        Send failures can leave sheets or extra windows that block all future
+        sends. Press Escape first (dismisses sheets/popovers), then click
+        Ignore/OK/button 1 on any remaining extra windows.
+
+        Calls osascript directly (bypasses _run_applescript) to avoid
+        redundant health checks inside the retry loop.
+        """
+        try:
+            script = '''
+tell application "System Events"
+    tell process "Messages"
+        -- Escape dismisses sheets and popovers (only if one exists)
+        if exists sheet 1 of window 1 then
+            key code 53
+            delay 0.2
+        end if
+        -- If an extra window appeared (error dialog), try standard buttons
+        if (count of windows) > 1 then
+            tell window 1
+                if exists button "Ignore" then
+                    click button "Ignore"
+                else if exists button "OK" then
+                    click button "OK"
+                else if exists button 1 then
+                    click button 1
+                end if
+            end tell
+        end if
+    end tell
+end tell
+'''
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e", script,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+        except Exception as e:
+            log.debug("Failed to dismiss error dialogs: %s", e)
+
     async def send_text(self, phone: str, message: str, retries: int = 3) -> bool:
         """Send a text message via iMessage, chunking if needed.
 
         Retries up to `retries` times with exponential backoff.
         """
-        chunks = self._chunk_message(message)
-        for i, chunk in enumerate(chunks):
-            sent = False
-            for attempt in range(retries):
-                script = self._build_send_text_script(phone, chunk)
-                success, error = await self._run_applescript(script)
-                if success:
-                    log.info("Sent message to %s (chunk %d/%d)", phone, i + 1, len(chunks))
-                    sent = True
-                    break
-                backoff = 2 ** attempt
-                log.warning(
-                    "Send failed (attempt %d/%d), retrying in %ds: %s",
-                    attempt + 1, retries, backoff, error,
-                )
-                await asyncio.sleep(backoff)
-            if not sent:
-                log.error("Failed to send message to %s after %d retries", phone, retries)
-                return False
-            # Delay between chunks to maintain order
-            if i < len(chunks) - 1:
-                await asyncio.sleep(1)
-        return True
+        if not await self._ensure_messages_running():
+            log.error("Cannot send message: Messages.app not available")
+            return False
+        async with self._send_lock:
+            chunks = self._chunk_message(message)
+            for i, chunk in enumerate(chunks):
+                sent = False
+                for attempt in range(retries):
+                    success, error = await self._send_text_once(phone, chunk)
+                    if success:
+                        log.info("Sent message to %s (chunk %d/%d)", phone, i + 1, len(chunks))
+                        sent = True
+                        break
+                    backoff = 2 ** attempt
+                    log.warning(
+                        "Send failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, retries, backoff, error,
+                    )
+                    await self._dismiss_error_dialogs()
+                    await asyncio.sleep(backoff)
+                if not sent:
+                    # Last resort: restart Messages and try once more
+                    if await self._restart_messages():
+                        success, error = await self._send_text_once(phone, chunk)
+                        if success:
+                            log.info("Sent message to %s after restart (chunk %d/%d)", phone, i + 1, len(chunks))
+                            sent = True
+                    if not sent:
+                        log.error("Failed to send message to %s after %d retries + restart", phone, retries)
+                        return False
+                # Delay between chunks to maintain order
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(1)
+            return True
 
     async def send_image(self, phone: str, image_path: str, retries: int = 3) -> bool:
         """Send an image via iMessage.
@@ -164,20 +310,32 @@ end tell
             )
             return False
 
-        for attempt in range(retries):
-            script = self._build_send_image_script(phone, image_path)
-            success, error = await self._run_applescript(script)
-            if success:
-                log.info("Sent image to %s: %s", phone, image_path)
-                return True
-            backoff = 2 ** attempt
-            log.warning(
-                "Image send failed (attempt %d/%d), retrying in %ds: %s",
-                attempt + 1, retries, backoff, error,
-            )
-            await asyncio.sleep(backoff)
-        log.error("Failed to send image to %s after %d retries", phone, retries)
-        return False
+        if not await self._ensure_messages_running():
+            log.error("Cannot send image: Messages.app not available")
+            return False
+        async with self._send_lock:
+            for attempt in range(retries):
+                script = self._build_send_image_script(phone, image_path)
+                success, error = await self._run_applescript(script)
+                if success:
+                    log.info("Sent image to %s: %s", phone, image_path)
+                    return True
+                backoff = 2 ** attempt
+                log.warning(
+                    "Image send failed (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, retries, backoff, error,
+                )
+                await self._dismiss_error_dialogs()
+                await asyncio.sleep(backoff)
+            # Last resort: restart Messages and try once more
+            if await self._restart_messages():
+                script = self._build_send_image_script(phone, image_path)
+                success, error = await self._run_applescript(script)
+                if success:
+                    log.info("Sent image to %s after restart: %s", phone, image_path)
+                    return True
+            log.error("Failed to send image to %s after %d retries + restart", phone, retries)
+            return False
 
     def _chunk_message(self, message: str) -> list[str]:
         """Split a message into chunks at word boundaries."""
