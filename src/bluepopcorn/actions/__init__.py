@@ -20,7 +20,6 @@ from ._base import ERROR_GENERIC, StatusData, resolve_request_title, apply_ratin
 from .search import handle_search
 from .request import handle_request
 from .status import handle_check_status
-from .weather import handle_weather
 from .recent import handle_recent
 from .recommend import handle_recommend
 from .memory import handle_remember, handle_forget
@@ -135,7 +134,6 @@ class ActionExecutor:
                 "Things I can do:\n"
                 "- Add movies/shows (e.g. 'add severance')\n"
                 "- Tell you about a title ('what's Bugonia about?')\n"
-                "- Weather & pollen ('what's the weather like?')\n"
                 "- What's new on the server ('what's been added?')\n"
                 "- Remember things ('remember I like sci-fi')\n"
                 "- 'status' - check pending requests\n"
@@ -269,8 +267,6 @@ class ActionExecutor:
             return await handle_request(self, decision, sender_phone)
         elif decision.action == Action.CHECK_STATUS:
             return await handle_check_status(self, decision, sender_phone)
-        elif decision.action == Action.WEATHER:
-            return await handle_weather(self, decision, sender_phone)
         elif decision.action == Action.RECENT:
             return await handle_recent(self, decision, sender_phone)
         elif decision.action == Action.RECOMMEND:

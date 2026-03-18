@@ -56,9 +56,8 @@ Only exceptions: bypass commands (status/help/new) and remember/forget use Pytho
 Each external service is its own module:
 
 - `seerr.py` -- Seerr API client (search, request, discover, ratings, genres)
-- `weather.py` -- Weather (Open-Meteo) + pollen (Aerobiology) as standalone functions
-- `morning_digest.py` -- Composes weather + seerr for daily digest message
-- `actions/` -- Action dispatch + handler package (search, request, status, weather, recent, recommend, memory)
+- `morning_digest.py` -- Composes daily digest from seerr data
+- `actions/` -- Action dispatch + handler package (search, request, status, recent, recommend, memory)
 - Adding a new service = new file + new handler in actions.py
 
 ## Seerr Integration
@@ -74,10 +73,8 @@ Each external service is its own module:
 ## Conventions
 
 - Package manager: `uv` (never pip), all Python via `uv run`
-- httpx for API requests (Seerr, Open-Meteo, pollen)
+- httpx for API requests (Seerr)
 - aiosqlite for chat.db (read-only `?mode=ro`)
-- Pollen API: always `?provider=aerobiology` (Hamilton station)
-- Weather: Open-Meteo, St. Catharines coordinates
 - AppleScript: `account`/`participant` pattern (Tahoe 26+), not old `service`/`buddy`
 - chat.db dates: nanoseconds since 2001-01-01 (Core Foundation epoch)
 - Log rotation: 5MB max, 3 backups

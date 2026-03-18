@@ -3,11 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import httpx
-
 from .config import Settings
 from .seerr import SeerrClient
-from .weather import get_weather, get_pollen
 
 log = logging.getLogger(__name__)
 
@@ -16,28 +13,15 @@ class MorningDigest:
     def __init__(self, settings: Settings, seerr: SeerrClient) -> None:
         self.settings = settings
         self.seerr = seerr
-        self.client = httpx.AsyncClient(timeout=settings.http_timeout)
 
     async def build(self) -> str:
         """Build the morning digest message."""
-        weather, pollen, media = await asyncio.gather(
-            get_weather(self.settings, self.client),
-            get_pollen(self.settings, self.client),
-            self._get_media_status(),
-        )
+        media = await self._get_media_status()
 
-        parts: list[str] = []
-        if weather:
-            parts.append(weather)
-        if pollen:
-            parts.append(pollen)
-        if media:
-            parts.append(media)
-
-        if not parts:
+        if not media:
             return "Good morning. Couldn't fetch any updates right now."
 
-        return "Good morning. " + " ".join(parts)
+        return "Good morning. " + media
 
     async def _get_media_status(self) -> str | None:
         """Get media status from Seerr."""
@@ -81,5 +65,3 @@ class MorningDigest:
             log.debug("Failed to fetch pending requests: %s", e)
         return None
 
-    async def close(self) -> None:
-        await self.client.aclose()

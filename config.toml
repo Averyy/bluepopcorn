@@ -11,10 +11,6 @@ debounce_delay = 0.3
 time = "09:30"
 
 [location]
-# St. Catharines for weather; pollen API hits nearest station (Hamilton)
-latitude = 43.1594
-longitude = -79.2469
-name = "St. Catharines"
 timezone = "America/Toronto"
 
 [paths]

@@ -8,7 +8,6 @@ class Action(str, enum.Enum):
     SEARCH = "search"
     REQUEST = "request"
     CHECK_STATUS = "check_status"
-    WEATHER = "weather"
     RECENT = "recent"
     RECOMMEND = "recommend"
     REMEMBER = "remember"
@@ -112,7 +111,7 @@ LLM_JSON_SCHEMA = {
         "action": {
             "type": "string",
             "enum": [
-                "search", "request", "check_status", "weather",
+                "search", "request", "check_status",
                 "recent", "recommend", "remember", "forget", "reply",
             ],
         },

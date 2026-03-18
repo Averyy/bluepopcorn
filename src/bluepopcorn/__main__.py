@@ -65,7 +65,6 @@ async def run_digest(settings: Settings) -> None:
     for phone in settings.allowed_senders:
         await sender.send_text(phone, text)
 
-    await digest.close()
     await seerr.close()
 
 
@@ -300,7 +299,6 @@ async def _schedule_digest(
             log.info("Digest: %s", text)
             for phone in settings.allowed_senders:
                 await msg_sender.send_text(phone, text)
-            await digest.close()
         except Exception as e:
             log.error("Digest failed: %s", e)
 

@@ -29,9 +29,6 @@ class Settings:
     digest_time: str = "07:30"
 
     # Location
-    latitude: float = 43.1594
-    longitude: float = -79.2469
-    location_name: str = "St. Catharines"
     timezone: str = "America/Toronto"
 
     # Paths
@@ -115,9 +112,6 @@ def load_settings(
         poll_interval=polling.get("interval", 0.5),
         debounce_delay=polling.get("debounce_delay", 0.3),
         digest_time=digest.get("time", "07:30"),
-        latitude=location.get("latitude", 43.1594),
-        longitude=location.get("longitude", -79.2469),
-        location_name=location.get("name", "St. Catharines"),
         timezone=location.get("timezone", "America/Toronto"),
         poster_dir=paths.get("poster_dir", "~/Pictures/bluepopcorn"),
         db_path=paths.get("db_path", "~/.local/share/bluepopcorn/bot.db"),

@@ -79,6 +79,9 @@ Per-user memory is now injected dynamically via `_build_prompt()`, not as a stat
 File: `data/memory/{phone}.md` (e.g. `data/memory/+1XXXXXXXXXX.md`)
 
 ```markdown
+# Profile
+Name: Avery
+
 # Preferences
 - Prefers 4K quality profiles
 - Watches a lot of sci-fi and dark comedy
@@ -98,6 +101,8 @@ File: `data/memory/{phone}.md` (e.g. `data/memory/+1XXXXXXXXXX.md`)
 - Jan 2026: First month. Mostly testing. Set up preferences.
 ```
 
+The `# Profile` section stores the sender's display name (and any future contact-like fields). Set via "remember my name is Avery" — the `remember` handler detects name-like facts and writes to `# Profile` instead of `# Preferences`. The name is injected into the prompt so the bot can address the user naturally. This replaces the contacts integration idea — no macOS Contacts permission needed, the user just tells the bot their name.
+
 ## Files to Modify
 
 ### 1. New: `src/bluepopcorn/memory.py` — Per-user markdown memory manager
@@ -108,8 +113,10 @@ Section parsing approach: split file by lines, find `# SectionName` headers, ext
 
 Responsibilities:
 - `load(sender)` → read the full markdown file for a sender, return as string (for prompt injection). Returns empty string if file doesn't exist
+- `get_profile(sender)` → parse and return the `# Profile` section as a dict (e.g. `{"name": "Avery"}`)
+- `set_profile_field(sender, key, value)` → set a field in `# Profile` (e.g. `set_profile_field(sender, "name", "Avery")`)
 - `get_preferences(sender)` → parse and return just the `# Preferences` section lines
-- `add_preference(sender, fact)` → append a line under `# Preferences` (with fuzzy duplicate check — case-insensitive substring match)
+- `add_preference(sender, fact)` → append a line under `# Preferences` (with fuzzy duplicate check — case-insensitive substring match). If the fact looks like a name ("my name is X", "I'm X", "call me X"), route to `set_profile_field(sender, "name", X)` instead
 - `remove_preference(sender, keyword)` → remove first matching line from `# Preferences`. Returns bool
 - `append_summary(sender, date, summary, tier)` → append to `# Recent`, `# Weekly`, or `# History`
 - `get_section(sender, section)` → parse and return lines from a specific section
@@ -189,7 +196,7 @@ This is the core of the migration. `actions.py` was split into a handler package
 | `db.get_history(sender)` in `_handle_search` | 1 | Pass `user_text` param directly (see below) |
 | `db.get_facts(sender)` in `_build_prompt` | 1 | `memory.get_preferences(sender)` |
 | `db.clear_history(sender)` in "new" bypass | 1 | `_clear_context()` + set `_session_start[sender]` |
-| `db.add_fact(sender, fact)` | 1 | `memory.add_preference(sender, fact)` |
+| `db.add_fact(sender, fact)` | 1 | `memory.add_preference(sender, fact)` (auto-routes name-like facts to `# Profile`) |
 | `db.remove_fact(sender, keyword)` | 1 | `memory.remove_preference(sender, keyword)` |
 
 **Constructor changes:**
@@ -322,6 +329,9 @@ CLI test mode needs to work without chat.db:
 <context>[Current time: Monday March 16, 2026 2:30 PM EDT]</context>
 
 <memory>
+# Profile
+Name: Avery
+
 # Preferences
 - Prefers 4K quality profiles
 - Watches a lot of sci-fi and dark comedy

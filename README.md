@@ -1,6 +1,6 @@
 # BluePopcorn
 
-iMessage bot for Seerr media requests, weather, and more. Runs on a Mac Mini, uses Claude Haiku for natural language understanding.
+iMessage bot for Seerr media requests. Runs on a Mac Mini, uses Claude Haiku for natural language understanding.
 
 ## What It Does
 
@@ -8,13 +8,12 @@ Text the bot to:
 - **Add movies/shows** — "add severance" → searches TMDB → shows poster → confirms → requests on Seerr
 - **Ask about titles** — "what's The Abandons about?" → searches and describes with TMDB rating + trailer link
 - **Get recommendations** — "good sci-fi from 2026?" → searches TMDB and presents options
-- **Check weather** — "what's the weather like?" → St. Catharines weather + Hamilton pollen (Aerobiology)
 - **See what's new** — "what's been added?" → recently added movies/shows from Seerr
 - **Check requests** — "status" → pending Seerr requests
 - **Remember things** — "remember I like sci-fi" → stores per-user preferences in SQLite
 
 ### Proactive Notifications
-- **Morning digest** — weather + pollen + media status at a configurable time
+- **Morning digest** — media status at a configurable time
 - **Seerr webhooks** — alerts when media is approved, available, or fails
 - **Quiet hours** — no proactive messages between 22:00-07:00
 
@@ -25,7 +24,6 @@ Text the bot to:
 | "add severance" | Search + poster + request flow |
 | "what's X about" | Search + describe with rating/trailer |
 | "recommend a thriller" | TMDB search for the genre |
-| "what's the weather" | Weather + pollen |
 | "what's new" | Recently added media from Seerr |
 | "status" / "pending" | Pending Seerr requests (no LLM) |
 | "new" / "reset" / "clear" | Clear conversation history |
@@ -39,7 +37,7 @@ Text the bot to:
 iMessage (chat.db poll) → Python daemon → claude -p (Haiku) → structured JSON
                                         ↕                       ↓
                         AppleScript send ←                 Python executes + formats
-                                                           (Seerr API, weather, posters)
+                                                           (Seerr API, posters)
 ```
 
 Single async Python daemon. Two LLM calls per message — Haiku returns a structured JSON decision (call 1: `{"action": "search", "query": "severance"}`), Python executes the API call, then Haiku crafts the natural-language response using the results as context (call 2). Python formats directly only as a fallback if call 2 fails.
@@ -49,13 +47,11 @@ Single async Python daemon. Two LLM calls per message — Haiku returns a struct
 - **Per-user memory**: SQLite `user_facts` table, injected into every LLM prompt
 - **Time context**: current date/time included in every call
 - **Poster intelligence**: collage for disambiguation ("add avatar"), single poster for info queries
-- **Weather keywords**: "weather", "pollen", "forecast" always trigger weather — no LLM guessing
-
 ## Stack
 
 - Python 3.12, asyncio
 - Claude Haiku via `claude -p` CLI (Pro/Max subscription, no API fees)
-- httpx (Seerr, Open-Meteo, pollen APIs)
+- httpx (Seerr API)
 - aiosqlite (chat.db reads, bot state)
 - Pillow (poster collages)
 - AppleScript (iMessage sending + typing indicator)
@@ -122,8 +118,7 @@ bluepopcorn/
     llm.py                # claude -p subprocess wrapper
     actions/              # Action dispatch + handler package (search, request, status, etc.)
     seerr.py              # Seerr API client (search, request, discover, ratings)
-    weather.py            # Weather (Open-Meteo) + pollen (Aerobiology)
-    morning_digest.py     # Daily digest (composes weather + seerr)
+    morning_digest.py     # Daily digest (media status from Seerr)
     monitor.py            # chat.db poller
     sender.py             # AppleScript iMessage + typing indicator
     db.py                 # Bot state SQLite (cursor, history, facts)
