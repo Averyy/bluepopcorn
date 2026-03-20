@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import urllib.parse
 from typing import Any
 
@@ -15,6 +16,19 @@ log = logging.getLogger(__name__)
 
 ALLOWED_LANGUAGES = {"en", "es", "ja", "ko"}
 MIN_YEAR = 2000
+
+
+def _title_match_rank(item: dict, query_lower: str) -> int:
+    """Rank how well an item's title matches the search query. 0=exact, 1=none.
+
+    Checks both localized and original titles so non-English titles
+    (e.g. "La oficina") aren't buried by popular English results.
+    """
+    for key in ("title", "name", "originalTitle", "originalName"):
+        val = item.get(key, "")
+        if val and val.lower() == query_lower:
+            return 0
+    return 1
 
 # Common shorthands users type → list of canonical names to try (first match wins)
 GENRE_SHORTHANDS: dict[str, list[str]] = {
@@ -73,6 +87,10 @@ class SeerrClient:
         # Dynamic genre maps, loaded lazily
         self._genre_map_movie: dict[str, int] | None = None
         self._genre_map_tv: dict[str, int] | None = None
+        # Detail cache: (media_type, tmdb_id) -> {title, year, overview, poster_path, ts}
+        # TMDB metadata never changes — 2-week TTL. Status is NOT cached (comes from list endpoints).
+        self._detail_cache: dict[tuple[str, int], dict] = {}
+        self._detail_cache_ttl = 14 * 86400  # 2 weeks
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Make an API-key-authenticated request.
@@ -162,12 +180,21 @@ class SeerrClient:
 
     # --- Search ---
 
-    async def search(self, query: str) -> list[SearchResult]:
-        """Search for movies and TV shows."""
-        # Extract hints from the original query before cleaning
-        query_lower = query.lower()
-        want_movie = any(w in query_lower for w in ("movie", "film"))
-        want_tv = any(w in query_lower for w in ("tv", "show", "series"))
+    async def search(self, query: str, media_type: str | None = None) -> list[SearchResult]:
+        """Search for movies and TV shows.
+
+        If media_type is provided ("movie" or "tv"), use it for post-filtering
+        instead of keyword parsing. Keyword parsing is the fallback.
+        """
+        # Explicit media_type from LLM decision takes priority
+        if media_type:
+            want_movie = media_type == "movie"
+            want_tv = media_type == "tv"
+        else:
+            # Extract hints from the original query before cleaning
+            query_lower = query.lower()
+            want_movie = any(w in query_lower for w in ("movie", "film"))
+            want_tv = any(w in query_lower for w in ("tv", "show", "series"))
         # Only strip trailing years — preserves "2001: A Space Odyssey", "1917", "Blade Runner 2049"
         year_match = re.search(r"\s+((?:19|20)\d{2})\s*$", query)
         want_year = int(year_match.group(1)) if year_match else None
@@ -182,7 +209,16 @@ class SeerrClient:
 
         resp = await self._try_search(search_query)
         data = resp.json()
-        results = self._parse_results(data.get("results", []))
+        # Sort by title match first (exact matches win), then popularity.
+        # Prevents popular-but-wrong results (e.g. The Office) from burying
+        # exact matches (e.g. La oficina) that the API returned as relevant.
+        raw_results = data.get("results", [])
+        q_lower = search_query.lower()
+        raw_results.sort(key=lambda x: (
+            _title_match_rank(x, q_lower),
+            -x.get("popularity", 0),
+        ))
+        results = self._parse_results(raw_results)
 
         # If too few results from page 1, try page 2
         if len(results) < 3 and data.get("totalPages", 1) > 1:
@@ -217,11 +253,15 @@ class SeerrClient:
                     resp = await self._try_search(stripped)
                     data = resp.json()
                     results = self._parse_results(data.get("results", []))
-                    # Re-apply filters on new results
+                    # Re-apply type filters on new results (no fallback to wrong type)
                     if want_movie and not want_tv:
-                        results = [r for r in results if r.media_type == "movie"] or results
+                        type_filtered = [r for r in results if r.media_type == "movie"]
+                        if type_filtered:
+                            results = type_filtered
                     elif want_tv and not want_movie:
-                        results = [r for r in results if r.media_type == "tv"] or results
+                        type_filtered = [r for r in results if r.media_type == "tv"]
+                        if type_filtered:
+                            results = type_filtered
                     year_filtered = [r for r in results if r.year == want_year]
                     if year_filtered:
                         results = year_filtered
@@ -269,6 +309,29 @@ class SeerrClient:
                     continue
 
         raise SeerrSearchError(f"All search attempts failed for: {query}")
+
+    async def search_keywords(self, query: str) -> list[int]:
+        """Search TMDB keywords and return matching keyword IDs.
+
+        Used by recommend handler to discover by thematic keywords
+        (e.g. "robots" -> keyword IDs -> discover by keywords).
+        """
+        if not query.strip():
+            return []
+        try:
+            resp = await self._request(
+                "GET", "/api/v1/search/keyword",
+                params={"query": query},
+            )
+            data = resp.json()
+            results = data.get("results", [])
+            ids = [r["id"] for r in results[:5] if r.get("id")]
+            if ids:
+                log.info("Keyword search '%s': %d IDs", query, len(ids))
+            return ids
+        except Exception as e:
+            log.debug("Keyword search failed for '%s': %s", query, e)
+            return []
 
     async def request_media(
         self, media_type: str, tmdb_id: int, *, seasons: list[int] | None = None
@@ -460,41 +523,155 @@ class SeerrClient:
             release = data.get("releaseDate", "")
             return release or None
 
+    async def _resolve_detail(self, media_type: str, tmdb_id: int) -> dict:
+        """Resolve title/year/overview/poster for a media item, using the 2-week detail cache."""
+        cache_key = (media_type, tmdb_id)
+        cached = self._detail_cache.get(cache_key)
+        if cached and time.time() - cached["ts"] < self._detail_cache_ttl:
+            return cached
+
+        try:
+            resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
+            detail = resp.json()
+            release = detail.get("releaseDate") or detail.get("firstAirDate") or ""
+            year = int(release[:4]) if len(release) >= 4 else None
+            entry = {
+                "title": seerr_title(detail),
+                "year": year,
+                "overview": detail.get("overview") or "",
+                "poster_path": detail.get("posterPath"),
+                "ts": time.time(),
+            }
+            self._detail_cache[cache_key] = entry
+            return entry
+        except Exception:
+            return {"title": "Unknown", "year": None, "overview": "", "poster_path": None, "ts": 0}
+
     async def get_recently_added(self, take: int = 5) -> list[dict]:
         """Get media recently added to the library with resolved titles (concurrent)."""
         resp = await self._request(
             "GET", "/api/v1/media",
-            params={"sort": "mediaAdded", "take": take},
+            params={"filter": "allavailable", "sort": "mediaAdded", "take": take},
         )
         data = resp.json()
         items = [
             item for item in data.get("results", [])
             if item.get("tmdbId") and item.get("mediaType")
+            and item.get("status") in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE)
         ]
         if not items:
             return []
 
-        # Resolve titles concurrently
         async def resolve_title(item: dict) -> dict:
             tmdb_id = item["tmdbId"]
             media_type = item["mediaType"]
             added = item.get("mediaAddedAt") or item.get("createdAt", "")
-            try:
-                detail_resp = await self._request(
-                    "GET", f"/api/v1/{media_type}/{tmdb_id}"
-                )
-                detail = detail_resp.json()
-                title = seerr_title(detail)
-            except Exception:
-                title = item.get("externalServiceSlug", "Unknown").replace("-", " ").title()
+            detail = await self._resolve_detail(media_type, tmdb_id)
             return {
-                "title": title,
+                "title": detail["title"],
                 "mediaType": media_type,
                 "tmdbId": tmdb_id,
                 "addedAt": added,
             }
 
         return await asyncio.gather(*[resolve_title(item) for item in items])
+
+    async def get_server_state(self, page: int = 1, take: int = 10) -> dict:
+        """Fetch available + requested/processing media in parallel.
+
+        Returns {"available": [...], "requested": [...]}, each item with
+        title, year, media_type, overview, status, tmdb_id, and a timestamp field.
+        """
+        skip = (page - 1) * take
+        log.info("Fetching server state (page=%d, take=%d)", page, take)
+
+        available_resp, processing_resp, pending_resp = await asyncio.gather(
+            self._request("GET", "/api/v1/media", params={
+                "filter": "allavailable", "sort": "mediaAdded",
+                "take": take, "skip": skip,
+            }),
+            self._request("GET", "/api/v1/request", params={
+                "filter": "processing", "take": take, "skip": skip,
+            }),
+            self._request("GET", "/api/v1/request", params={
+                "filter": "pending", "take": take, "skip": skip,
+            }),
+        )
+
+        # --- Available items ---
+        available_raw = [
+            item for item in available_resp.json().get("results", [])
+            if item.get("tmdbId") and item.get("mediaType")
+            and item.get("status") in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE)
+        ]
+
+        # --- Requested items (merge processing + pending) ---
+        requested_raw: list[dict] = []
+        for resp in (processing_resp, pending_resp):
+            for req in resp.json().get("results", []):
+                media = req.get("media") or {}
+                if media.get("tmdbId") and media.get("mediaType"):
+                    requested_raw.append(req)
+
+        # Dedupe: if an item is in both available and requested, keep in requested only
+        requested_keys: set[tuple[str, int]] = set()
+        for req in requested_raw:
+            media = req["media"]
+            requested_keys.add((media["mediaType"], media["tmdbId"]))
+        available_raw = [
+            item for item in available_raw
+            if (item["mediaType"], item["tmdbId"]) not in requested_keys
+        ]
+
+        # Resolve details concurrently for all items
+        async def resolve_available(item: dict) -> dict:
+            tmdb_id = item["tmdbId"]
+            media_type = item["mediaType"]
+            detail = await self._resolve_detail(media_type, tmdb_id)
+            raw_status = item.get("status", 0)
+            try:
+                status = MediaStatus(raw_status)
+            except ValueError:
+                status = MediaStatus.UNKNOWN
+            return {
+                "title": detail["title"],
+                "year": detail["year"],
+                "media_type": media_type,
+                "overview": detail["overview"],
+                "status": status.name.lower(),
+                "tmdb_id": tmdb_id,
+                "added_at": item.get("mediaAddedAt") or item.get("createdAt", ""),
+            }
+
+        async def resolve_requested(req: dict) -> dict:
+            media = req["media"]
+            tmdb_id = media["tmdbId"]
+            media_type = media["mediaType"]
+            detail = await self._resolve_detail(media_type, tmdb_id)
+            raw_status = media.get("status", 0)
+            try:
+                status = MediaStatus(raw_status)
+            except ValueError:
+                status = MediaStatus.UNKNOWN
+            return {
+                "title": detail["title"],
+                "year": detail["year"],
+                "media_type": media_type,
+                "overview": detail["overview"],
+                "status": status.name.lower(),
+                "tmdb_id": tmdb_id,
+                "requested_at": req.get("createdAt", ""),
+            }
+
+        available, requested = await asyncio.gather(
+            asyncio.gather(*[resolve_available(item) for item in available_raw]),
+            asyncio.gather(*[resolve_requested(req) for req in requested_raw]),
+        )
+
+        return {
+            "available": list(available),
+            "requested": list(requested),
+        }
 
     def _parse_results(
         self,
@@ -558,13 +735,83 @@ class SeerrClient:
                     title=title,
                     year=year,
                     media_type=media_type,
-                    overview=(item.get("overview") or "")[:200],
+                    overview=item.get("overview") or "",
                     status=status,
                     poster_path=item.get("posterPath"),
                     rating=rating,
                     download_progress=download_progress,
                 )
             )
+        return results
+
+    async def search_person_credits(
+        self, name: str, want_type: str | None = None,
+        take: int = 7, exclude_ids: set[int] | None = None,
+    ) -> list[SearchResult]:
+        """Search for a person by name and return their filmography.
+
+        Uses /api/v1/search to find the person, then /api/v1/person/{id}/combined_credits
+        to get their movies/shows sorted by popularity.
+
+        Filters out talk show / award show appearances (character starts with "Self")
+        and non-directing crew credits (keeps only Director jobs for crew).
+        """
+        resp = await self._try_search(name)
+        data = resp.json()
+
+        # Find the first person result
+        person = None
+        for item in data.get("results", []):
+            if item.get("mediaType") == "person":
+                person = item
+                break
+        if not person:
+            return []
+
+        person_id = person["id"]
+        person_name = person.get("name", name)
+        log.info("Found person: %s (id=%d)", person_name, person_id)
+
+        # Get their combined credits (movies + TV)
+        try:
+            credits_resp = await self._request(
+                "GET", f"/api/v1/person/{person_id}/combined_credits",
+                params={"language": "en"},
+            )
+            credits_data = credits_resp.json()
+        except Exception as e:
+            log.warning("Person credits lookup failed for %s: %s", person_name, e)
+            return []
+
+        # Filter cast: exclude "Self" appearances (talk shows, award shows, interviews)
+        seen_ids: set[int] = set()
+        filtered: list[dict] = []
+        for credit in credits_data.get("cast", []):
+            char = (credit.get("character") or "").strip()
+            if char.startswith("Self"):
+                continue
+            cid = credit.get("id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                filtered.append(credit)
+
+        # Filter crew: only directing credits (skip Thanks, Producer dupes)
+        for credit in credits_data.get("crew", []):
+            if credit.get("job") != "Director":
+                continue
+            cid = credit.get("id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                filtered.append(credit)
+
+        filtered.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+        results = self._parse_results(
+            filtered, take,
+            filter_lang_year=True, min_votes=500, exclude_ids=exclude_ids,
+        )
+        # Tag results so the caller knows they came from person search
+        for r in results:
+            r.from_person = True
         return results
 
     async def get_recommendations(self, media_type: str, tmdb_id: int, take: int = 3, exclude_ids: set[int] | None = None) -> list[SearchResult]:
@@ -604,33 +851,33 @@ class SeerrClient:
         return results
 
     async def discover_movies(
-        self, genre_id: int | None = None, year: int | None = None,
-        year_end: int | None = None, take: int = 5,
+        self, genre_id: int | None = None, keyword_ids: list[int] | None = None,
+        year: int | None = None, year_end: int | None = None, take: int = 5,
         exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
-        """Discover movies by genre and/or year."""
+        """Discover movies by genre, keywords, and/or year."""
         date_params = ("primaryReleaseDateGte", "primaryReleaseDateLte")
         return await self._discover_paginated(
-            "movies", date_params, genre_id=genre_id, year=year,
-            year_end=year_end, take=take, exclude_ids=exclude_ids,
+            "movies", date_params, genre_id=genre_id, keyword_ids=keyword_ids,
+            year=year, year_end=year_end, take=take, exclude_ids=exclude_ids,
         )
 
     async def discover_tv(
-        self, genre_id: int | None = None, year: int | None = None,
-        year_end: int | None = None, take: int = 5,
+        self, genre_id: int | None = None, keyword_ids: list[int] | None = None,
+        year: int | None = None, year_end: int | None = None, take: int = 5,
         exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
-        """Discover TV shows by genre and/or year."""
+        """Discover TV shows by genre, keywords, and/or year."""
         date_params = ("firstAirDateGte", "firstAirDateLte")
         return await self._discover_paginated(
-            "tv", date_params, genre_id=genre_id, year=year,
-            year_end=year_end, take=take, exclude_ids=exclude_ids,
+            "tv", date_params, genre_id=genre_id, keyword_ids=keyword_ids,
+            year=year, year_end=year_end, take=take, exclude_ids=exclude_ids,
         )
 
     async def _discover_paginated(
         self, media_type: str, date_params: tuple[str, str], *,
-        genre_id: int | None = None, year: int | None = None,
-        year_end: int | None = None, take: int = 5,
+        genre_id: int | None = None, keyword_ids: list[int] | None = None,
+        year: int | None = None, year_end: int | None = None, take: int = 5,
         exclude_ids: set[int] | None = None,
     ) -> list[SearchResult]:
         """Shared paginated discovery for movies and TV."""
@@ -641,11 +888,14 @@ class SeerrClient:
         }
         if genre_id is not None:
             params["genre"] = str(genre_id)
+        if keyword_ids:
+            # Pipe = OR logic (comma = AND, too restrictive)
+            params["keywords"] = "|".join(str(k) for k in keyword_ids)
         if year is not None:
             params[date_params[0]] = f"{year}-01-01"
             end = year_end or year
             params[date_params[1]] = f"{end}-12-31"
-        log.info("Seerr discover %s: genre=%s year=%s", media_type, genre_id, year)
+        log.info("Seerr discover %s: genre=%s keywords=%s year=%s", media_type, genre_id, bool(keyword_ids), year)
         results: list[SearchResult] = []
         for page in range(1, 6):
             params["page"] = page

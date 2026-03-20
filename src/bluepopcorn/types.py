@@ -7,7 +7,6 @@ from dataclasses import dataclass
 class Action(str, enum.Enum):
     SEARCH = "search"
     REQUEST = "request"
-    CHECK_STATUS = "check_status"
     RECENT = "recent"
     RECOMMEND = "recommend"
     REMEMBER = "remember"
@@ -42,6 +41,16 @@ class LLMDecision:
     tmdb_id: int | None = None
     media_type: str | None = None  # "movie" or "tv"
     fact: str | None = None  # for remember/forget actions
+    # Structured recommend fields (LLM specifies these instead of dumping into query)
+    genre: str | None = None  # genre name, e.g. "sci-fi", "comedy"
+    keyword: str | None = None  # thematic keyword, e.g. "robots", "time travel"
+    year: int | None = None  # year or start of range
+    year_end: int | None = None  # end of year range (e.g. year=2020, year_end=2029 for "2020s")
+    similar_to: str | None = None  # title name for "similar to X"
+    trending: bool = False  # whether to show trending content
+    count: int | None = None  # number of results to return (default 5)
+    page: int | None = None  # pagination for recent/server state
+    multiple_results: bool = False  # LLM presenting multiple numbered options vs single focus
 
     @classmethod
     def from_dict(cls, data: dict) -> LLMDecision:
@@ -52,6 +61,15 @@ class LLMDecision:
             tmdb_id=data.get("tmdb_id"),
             media_type=data.get("media_type"),
             fact=data.get("fact"),
+            genre=data.get("genre"),
+            keyword=data.get("keyword"),
+            year=data.get("year"),
+            year_end=data.get("year_end"),
+            similar_to=data.get("similar_to"),
+            trending=data.get("trending", False),
+            count=data.get("count"),
+            page=data.get("page"),
+            multiple_results=data.get("multiple_results", False),
         )
 
 
@@ -78,6 +96,7 @@ class SearchResult:
     imdb_rating: str | None = None  # IMDB score (e.g. "8.7")
     download_progress: str | None = None  # e.g. "51%" when actively downloading
     next_air_date: str | None = None  # e.g. "S2E5 airs 2026-03-20" or "2026-07-04"
+    from_person: bool = False  # True if result came from person search (actor/director credits)
 
     @property
     def status_label(self) -> str:
@@ -111,7 +130,7 @@ LLM_JSON_SCHEMA = {
         "action": {
             "type": "string",
             "enum": [
-                "search", "request", "check_status",
+                "search", "request",
                 "recent", "recommend", "remember", "forget", "reply",
             ],
         },
@@ -120,6 +139,31 @@ LLM_JSON_SCHEMA = {
         "media_type": {"type": "string", "enum": ["movie", "tv"]},
         "message": {"type": "string"},
         "fact": {"type": "string"},
+        "genre": {"type": "string"},
+        "keyword": {"type": "string"},
+        "year": {"type": "integer"},
+        "year_end": {"type": "integer"},
+        "similar_to": {"type": "string"},
+        "trending": {"type": "boolean"},
+        "count": {"type": "integer"},
+        "page": {"type": "integer"},
+    },
+    "required": ["action", "message"],
+    "additionalProperties": False,
+}
+
+# Restricted schema for _llm_respond — only reply or request (follow-up "add it")
+LLM_RESPOND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["reply", "request"],
+        },
+        "tmdb_id": {"type": "integer"},
+        "media_type": {"type": "string", "enum": ["movie", "tv"]},
+        "message": {"type": "string"},
+        "multiple_results": {"type": "boolean"},
     },
     "required": ["action", "message"],
     "additionalProperties": False,

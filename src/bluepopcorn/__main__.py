@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 
 from .actions import ActionExecutor, ERROR_GENERIC
 from .cli import cli_mode
+from .compression import Compressor
 from .config import Settings, load_settings
-from .db import BotDatabase
+from .memory import UserMemory
 from .morning_digest import MorningDigest
 from .llm import LLMClient
 from .monitor import MessageMonitor
@@ -24,6 +25,33 @@ from .types import IncomingMessage
 from .webhooks import WebhookServer
 
 log = logging.getLogger("bluepopcorn")
+
+# Will be set from settings in run_daemon()
+_last_rowid_path: Path | None = None
+
+
+def _read_last_rowid() -> int | None:
+    """Read the last processed ROWID from file."""
+    if _last_rowid_path is None:
+        raise RuntimeError("_last_rowid_path not initialized — run_daemon() must be called first")
+    try:
+        return int(_last_rowid_path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _write_last_rowid(rowid: int) -> None:
+    """Write the last processed ROWID to file (atomic)."""
+    if _last_rowid_path is None:
+        raise RuntimeError("_last_rowid_path not initialized — run_daemon() must be called first")
+    _last_rowid_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _last_rowid_path.with_suffix(".tmp")
+    try:
+        tmp.write_text(str(rowid))
+        tmp.rename(_last_rowid_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def setup_logging(level: str, log_path: str = "bluepopcorn.log") -> None:
@@ -70,6 +98,9 @@ async def run_digest(settings: Settings) -> None:
 
 async def run_daemon(settings: Settings) -> None:
     """Main async daemon loop."""
+    global _last_rowid_path
+    _last_rowid_path = settings.resolve_path(settings.data_dir) / "last_rowid"
+
     log.info("Starting BluePopcorn daemon")
 
     # Init components
@@ -77,10 +108,8 @@ async def run_daemon(settings: Settings) -> None:
     llm = LLMClient(settings)
     sender = MessageSender(settings)
     posters = PosterHandler(settings)
-    db = BotDatabase(settings)
+    memory = UserMemory(settings)
     monitor = MessageMonitor(settings)
-
-    await db.init()
 
     # Ensure poster dir exists
     settings.resolve_path(settings.poster_dir).mkdir(parents=True, exist_ok=True)
@@ -94,15 +123,16 @@ async def run_daemon(settings: Settings) -> None:
         llm=llm,
         sender=sender,
         posters=posters,
-        db=db,
+        memory=memory,
+        monitor=monitor,
         settings=settings,
     )
 
-    # Initialize ROWID cursor
-    last_rowid = await db.get_last_rowid()
+    # Initialize ROWID cursor (file-based)
+    last_rowid = _read_last_rowid()
     if last_rowid is None:
         last_rowid = await monitor.get_max_rowid()
-        await db.set_last_rowid(last_rowid)
+        _write_last_rowid(last_rowid)
         log.info("Initialized ROWID cursor to %d", last_rowid)
     else:
         log.info("Resuming from ROWID %d", last_rowid)
@@ -118,8 +148,11 @@ async def run_daemon(settings: Settings) -> None:
     webhook_server = WebhookServer(settings, on_notification=send_to_all)
     await webhook_server.start()
 
-    # Digest scheduler
-    digest_task = asyncio.create_task(_schedule_digest(settings, seerr, sender))
+    # Digest + compression scheduler
+    compressor = Compressor(settings, llm, monitor, memory)
+    digest_task = asyncio.create_task(
+        _schedule_digest(settings, seerr, sender, compressor)
+    )
 
     # Shutdown event
     shutdown = asyncio.Event()
@@ -166,7 +199,7 @@ async def run_daemon(settings: Settings) -> None:
             for msg in messages:
                 if msg.rowid > last_rowid:
                     last_rowid = msg.rowid
-                    await db.set_last_rowid(last_rowid)
+                    _write_last_rowid(last_rowid)
 
             # Group by sender, keep only the latest message per sender
             latest_by_sender: dict[str, IncomingMessage] = {}
@@ -196,7 +229,6 @@ async def run_daemon(settings: Settings) -> None:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         await webhook_server.stop()
         await monitor.close()
-        await db.close()
         await seerr.close()
         await posters.close()
         log.info("Shutdown complete")
@@ -214,7 +246,7 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
                 log.debug("Skipping debounced message from %s", msg.sender)
                 return
         except Exception as e:
-            log.debug("Debounce check failed: %s", e)
+            log.warning("Debounce check failed (proceeding anyway): %s", e)
 
         try:
             log.info("IN  %s: %s", msg.sender, msg.text[:200])
@@ -275,9 +307,12 @@ def _is_quiet_hours(settings: Settings) -> bool:
 
 
 async def _schedule_digest(
-    settings: Settings, seerr: SeerrClient, msg_sender: MessageSender
+    settings: Settings,
+    seerr: SeerrClient,
+    msg_sender: MessageSender,
+    compressor: Compressor,
 ) -> None:
-    """Schedule daily morning digest."""
+    """Schedule daily morning digest + memory compression."""
     tz = ZoneInfo(settings.timezone)
 
     hour, minute = map(int, settings.digest_time.split(":"))
@@ -301,6 +336,13 @@ async def _schedule_digest(
                 await msg_sender.send_text(phone, text)
         except Exception as e:
             log.error("Digest failed: %s", e)
+
+        # Run compression after digest for each allowed sender
+        for phone in settings.allowed_senders:
+            try:
+                await compressor.run_compression(phone)
+            except Exception as e:
+                log.error("Compression failed for %s: %s", phone, e)
 
         # Sleep past the target minute to prevent double-fire from sleep imprecision
         now = datetime.datetime.now(tz)

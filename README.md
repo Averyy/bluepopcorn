@@ -10,7 +10,7 @@ Text the bot to:
 - **Get recommendations** — "good sci-fi from 2026?" → searches TMDB and presents options
 - **See what's new** — "what's been added?" → recently added movies/shows from Seerr
 - **Check requests** — "status" → pending Seerr requests
-- **Remember things** — "remember I like sci-fi" → stores per-user preferences in SQLite
+- **Remember things** — "remember I like sci-fi" → stores per-user preferences in markdown memory files
 
 ### Proactive Notifications
 - **Morning digest** — media status at a configurable time
@@ -43,8 +43,8 @@ iMessage (chat.db poll) → Python daemon → claude -p (Haiku) → structured J
 Single async Python daemon. Two LLM calls per message — Haiku returns a structured JSON decision (call 1: `{"action": "search", "query": "severance"}`), Python executes the API call, then Haiku crafts the natural-language response using the results as context (call 2). Python formats directly only as a fallback if call 2 fails.
 
 ### How It Works
-- **Conversation history**: 20-entry sliding window per user, auto-clears after 1h gap
-- **Per-user memory**: SQLite `user_facts` table, injected into every LLM prompt
+- **Conversation history**: chat.db bidirectional reads + in-memory context buffer, session boundaries via "new"/"reset"
+- **Per-user memory**: Markdown files with tiered compression (daily → weekly → monthly), injected into every LLM prompt
 - **Time context**: current date/time included in every call
 - **Poster intelligence**: collage for disambiguation ("add avatar"), single poster for info queries
 ## Stack
@@ -52,7 +52,7 @@ Single async Python daemon. Two LLM calls per message — Haiku returns a struct
 - Python 3.12, asyncio
 - Claude Haiku via `claude -p` CLI (Pro/Max subscription, no API fees)
 - httpx (Seerr API)
-- aiosqlite (chat.db reads, bot state)
+- aiosqlite (chat.db reads)
 - Pillow (poster collages)
 - AppleScript (iMessage sending + typing indicator)
 
@@ -108,20 +108,21 @@ bluepopcorn/
   config.toml             # Non-secret settings
   personality.md          # Bot tone (→ LLM system prompt)
   instructions.md         # Action routing (→ LLM system prompt)
-  memory.md               # Global bot context (→ LLM system prompt)
   wrapper.swift           # Swift wrapper (compiled into BluePopcorn.app bundle)
   BluePopcorn.app/        # macOS app bundle (binary gitignored, Info.plist tracked)
+  data/memory/            # Per-user markdown memory files (gitignored)
   src/bluepopcorn/
     __main__.py           # Entry point, daemon loop
     config.py             # Settings from .env + config.toml
     types.py              # Dataclasses, enums, JSON schema
     llm.py                # claude -p subprocess wrapper
+    memory.py             # Per-user markdown memory manager
+    compression.py        # Tiered memory compression (daily/weekly/monthly)
     actions/              # Action dispatch + handler package (search, request, status, etc.)
     seerr.py              # Seerr API client (search, request, discover, ratings)
     morning_digest.py     # Daily digest (media status from Seerr)
-    monitor.py            # chat.db poller
+    monitor.py            # chat.db poller + bidirectional message queries
     sender.py             # AppleScript iMessage + typing indicator
-    db.py                 # Bot state SQLite (cursor, history, facts)
     posters.py            # TMDB poster download + Pillow collages
     webhooks.py           # Seerr webhook listener
     cli.py                # CLI test mode

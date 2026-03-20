@@ -15,14 +15,14 @@ timezone = "America/Toronto"
 
 [paths]
 poster_dir = "~/Pictures/bluepopcorn"
-db_path = "~/.local/share/bluepopcorn/bot.db"
 chat_db_path = "~/Library/Messages/chat.db"
+memory_dir = "data/memory"
 log_path = "bluepopcorn.log"
 
 [messages]
 max_length = 1200
 history_window = 20
-history_gap_hours = 1.0
+conversation_gap_hours = 2.0
 
 [notifications]
 quiet_start = "22:00"

@@ -6,8 +6,8 @@ import sys
 
 from .actions import ActionExecutor
 from .config import Settings, load_settings
-from .db import BotDatabase
 from .llm import LLMClient
+from .memory import UserMemory
 from .seerr import SeerrClient
 
 log = logging.getLogger(__name__)
@@ -20,21 +20,17 @@ async def cli_mode() -> None:
     settings = load_settings()
     seerr = SeerrClient(settings)
     llm = LLMClient(settings)
-    db = BotDatabase(settings)
-
-    await db.init()
+    memory = UserMemory(settings)
 
     executor = ActionExecutor(
         seerr=seerr,
         llm=llm,
         sender=None,  # No iMessage in CLI mode
         posters=None,  # No poster sending in CLI mode
-        db=db,
+        memory=memory,
+        monitor=None,  # Signals CLI mode — use _cli_history
         settings=settings,
     )
-
-    # Clear CLI user history on start
-    await db.clear_history(CLI_SENDER)
 
     print("BluePopcorn CLI mode. Type messages, Ctrl+C to quit.\n")
 
@@ -55,5 +51,4 @@ async def cli_mode() -> None:
     except KeyboardInterrupt:
         print("\nBye.")
     finally:
-        await db.close()
         await seerr.close()

@@ -3,38 +3,25 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
-from ..seerr import SeerrClient, seerr_title
 from ..types import MediaStatus, SearchResult
 
 log = logging.getLogger(__name__)
 
-ERROR_GENERIC = "Something went wrong, try again in a sec."
+ERROR_GENERIC = "Server error, please try again later."
 
 
-@dataclass
-class StatusData:
-    """Structured result from _fetch_status_data."""
-    processing_titles: list[str]
-    pending_titles: list[str]
-    recently_added: list[str]
-
-    @property
-    def has_activity(self) -> bool:
-        return bool(self.processing_titles or self.pending_titles or self.recently_added)
-
-
-def format_search_results(results: list[SearchResult]) -> str:
+def format_search_results(results: list[SearchResult], query: str | None = None) -> str:
     """Format search results as context for the LLM."""
     if not results:
         return "[No results found]"
 
-    lines = ["[Search results:"]
+    header = f"[Search results for '{query}':" if query else "[Search results:"
+    lines = [header]
     for i, r in enumerate(results, 1):
         year_str = f" ({r.year})" if r.year else ""
         type_str = "TV" if r.media_type == "tv" else "Movie"
-        overview = r.overview[:80] if r.overview else "No description"
+        overview = r.overview if r.overview else "No description"
         rating_str = f" Rating: {r.rating}/10" if r.rating else ""
         # Append RT and IMDB ratings when available
         ext_ratings: list[str] = []
@@ -53,32 +40,6 @@ def format_search_results(results: list[SearchResult]) -> str:
         )
     lines.append("]")
     return "\n".join(lines)
-
-
-async def resolve_request_title(req: dict, seerr: SeerrClient) -> str:
-    """Resolve a display title from a Seerr request object.
-
-    Request objects have media: MediaInfo which does NOT have a title field.
-    Must look up via the detail endpoint using tmdbId.
-    """
-    media = req.get("media", {})
-    tmdb_id = media.get("tmdbId")
-    media_type = media.get("mediaType")
-    if tmdb_id and media_type:
-        try:
-            detail = await seerr.get_media_status(media_type, tmdb_id)
-            if detail:
-                title = seerr_title(detail, default="")
-                if title:
-                    return title
-        except Exception as e:
-            log.debug("Title lookup failed for %s/%s, falling back to slug: %s",
-                      media_type, tmdb_id, e)
-    # Last resort fallback
-    slug = media.get("externalServiceSlug", "")
-    if slug and not slug.isdigit():
-        return slug.replace("-", " ").title()
-    return "Unknown"
 
 
 def apply_ratings(result: SearchResult, rating_dict: dict) -> None:
@@ -106,16 +67,6 @@ def format_rating_str(r: SearchResult) -> str:
     return ", ".join(parts) + "."
 
 
-def truncate(text: str, max_len: int) -> str:
-    """Truncate text to max_len, cutting at the last space."""
-    if len(text) <= max_len:
-        return text
-    cut = text[:max_len].rfind(" ")
-    if cut > max_len // 2:
-        return text[:cut]
-    return text[:max_len]
-
-
 def filter_available(results: list[SearchResult], take: int = 3) -> list[SearchResult]:
     """Prefer results the user doesn't already have for recommendations."""
     new = [r for r in results if r.status not in (
@@ -133,9 +84,8 @@ def format_single_result(r: SearchResult) -> str:
 
     parts: list[str] = []
 
-    # Overview, truncated to ~200 chars
     if r.overview:
-        overview = truncate(r.overview, 200).rstrip(".")
+        overview = r.overview.rstrip(".")
         parts.append(f"{title} — {overview}.")
     else:
         parts.append(f"{title}.")
@@ -180,7 +130,7 @@ def format_multiple_results(results: list[SearchResult]) -> str:
 
         overview = ""
         if r.overview:
-            overview = truncate(r.overview, 100).rstrip(".")
+            overview = r.overview.rstrip(".")
             overview = f" — {overview}."
 
         entry = f"{i}. {r.title}{year} [{type_str}]{overview}"
@@ -216,7 +166,7 @@ def format_recommendations(
 
         overview = ""
         if r.overview:
-            overview = truncate(r.overview, 120).rstrip(".")
+            overview = r.overview.rstrip(".")
             overview = f" — {overview}."
 
         entry = f"{i}. {r.title}{year} [{type_str}]{overview}"

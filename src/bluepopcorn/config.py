@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 
 @dataclass
 class Settings:
@@ -33,14 +35,15 @@ class Settings:
 
     # Paths
     poster_dir: str = "~/Pictures/bluepopcorn"
-    db_path: str = "~/.local/share/bluepopcorn/bot.db"
     chat_db_path: str = "~/Library/Messages/chat.db"
+    data_dir: str = "data"
+    memory_dir: str = "data/memory"
     log_path: str = "bluepopcorn.log"
 
     # Messages
     max_message_length: int = 1200
     history_window: int = 20
-    history_gap_hours: float = 1.0
+    conversation_gap_hours: float = 2.0
 
     # Notifications
     quiet_start: str = "22:00"
@@ -48,6 +51,7 @@ class Settings:
 
     # Webhooks
     webhook_port: int = 8095
+    webhook_secret: str = ""
 
     # HTTP
     http_timeout: int = 15
@@ -56,7 +60,10 @@ class Settings:
     log_level: str = "INFO"
 
     def resolve_path(self, path: str) -> Path:
-        return Path(path).expanduser()
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p
 
 
 def load_settings(
@@ -114,15 +121,17 @@ def load_settings(
         digest_time=digest.get("time", "07:30"),
         timezone=location.get("timezone", "America/Toronto"),
         poster_dir=paths.get("poster_dir", "~/Pictures/bluepopcorn"),
-        db_path=paths.get("db_path", "~/.local/share/bluepopcorn/bot.db"),
         chat_db_path=paths.get("chat_db_path", "~/Library/Messages/chat.db"),
+        data_dir=paths.get("data_dir", "data"),
+        memory_dir=paths.get("memory_dir", "data/memory"),
         log_path=paths.get("log_path", "bluepopcorn.log"),
         max_message_length=messages.get("max_length", 1200),
         history_window=messages.get("history_window", 20),
-        history_gap_hours=messages.get("history_gap_hours", 1.0),
+        conversation_gap_hours=messages.get("conversation_gap_hours", 2.0),
         quiet_start=notifications.get("quiet_start", "22:00"),
         quiet_end=notifications.get("quiet_end", "07:00"),
         webhook_port=webhooks.get("port", 8095),
+        webhook_secret=env.get("WEBHOOK_SECRET", ""),
         http_timeout=config.get("http", {}).get("timeout", 15),
         log_level=logging_cfg.get("level", "INFO"),
     )

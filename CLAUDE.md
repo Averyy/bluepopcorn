@@ -13,6 +13,8 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
 - **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
 - **After code changes, run `./restart.sh`** -- always restart the daemon after modifying Python code
+- **NEVER trigger real Seerr requests when testing** -- CLI tests hit the live API. Only test read-only flows (search, recommend, status, info). Do NOT test "add it", number picking, or any flow that triggers `action=request` / `request_media`. If you need to verify request logic, read the code — don't execute it
+- **After significant changes to prompts, actions, or LLM routing, run the conversation tests** -- `uv run python tests/test_conversations.py -s A,E,I` for a quick smoke test (~5 min), or the full suite for thorough validation. Significant = changes to personality.md, instructions.md, actions/*.py, llm.py, or _build_prompt
 
 ## Commands
 
@@ -23,6 +25,11 @@ uv run -m bluepopcorn --digest        # One-shot digest
 uv run -m bluepopcorn                 # Run daemon
 ./restart.sh                          # Restart daemon after Python changes
 tail -30 bluepopcorn.log              # Recent logs (adjust count as needed)
+
+# Conversation tests (hits real LLM + real Seerr, ~30 min for full suite)
+uv run python tests/test_conversations.py              # Full suite (A-Z)
+uv run python tests/test_conversations.py -s A,E,I     # Smoke test (3 scenarios)
+uv run python tests/test_conversations.py -s X --delay 3  # Single scenario, faster
 
 # Manual restart (restart.sh does this for you)
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist   # Stop

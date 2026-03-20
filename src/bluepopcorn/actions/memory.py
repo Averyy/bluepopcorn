@@ -14,9 +14,13 @@ async def handle_remember(
     """Store a user fact/preference."""
     fact = decision.fact or decision.message
     if not fact:
-        return "What should I remember?"
-    await executor.db.add_fact(sender_phone, fact)
-    return decision.message or "Got it, I'll remember that."
+        executor._add_context(sender_phone, "[Remember action: no fact was provided]")
+        return (await executor._llm_respond(sender_phone, intent=None))[0]
+    async with executor.memory.get_lock(sender_phone):
+        added = executor.memory.add_preference(sender_phone, fact)
+    if not added:
+        return decision.message
+    return decision.message
 
 
 async def handle_forget(
@@ -25,8 +29,8 @@ async def handle_forget(
     """Remove a stored user fact/preference."""
     keyword = decision.fact or decision.message
     if not keyword:
-        return "What should I forget?"
-    removed = await executor.db.remove_fact(sender_phone, keyword)
-    if removed:
-        return decision.message or "Done, forgot it."
-    return decision.message or "I don't have anything like that saved."
+        executor._add_context(sender_phone, "[Forget action: no keyword was provided]")
+        return (await executor._llm_respond(sender_phone, intent=None))[0]
+    async with executor.memory.get_lock(sender_phone):
+        removed = executor.memory.remove_preference(sender_phone, keyword)
+    return decision.message

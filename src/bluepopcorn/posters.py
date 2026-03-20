@@ -54,117 +54,75 @@ class PosterHandler:
             return None
         return await self.download_poster(result.poster_path)
 
-    async def create_collage(self, results: list[SearchResult]) -> Path | None:
-        """Create a numbered collage of posters for disambiguation.
+    async def download_all(self, results: list[SearchResult]) -> list[tuple[int, Path]]:
+        """Download posters for all results concurrently.
 
-        Downloads posters, resizes to same height, stitches side-by-side,
-        and adds number overlays.
+        Returns list of (1-indexed position, local path) for successful downloads.
         """
         if not results:
-            return None
-
-        # Download all posters concurrently
-        async def _download_or_none(result: SearchResult) -> Path | None:
-            if result.poster_path:
-                return await self.download_poster(result.poster_path)
-            return None
+            return []
 
         poster_paths: list[Path | None] = await asyncio.gather(
-            *(_download_or_none(r) for r in results)
+            *(self.download_poster(r.poster_path) for r in results)
         )
 
-        # Filter to posters that downloaded successfully (sequential numbering)
-        valid: list[Path] = [p for p in poster_paths if p is not None]
-        if not valid:
-            return None
+        return [(i + 1, p) for i, p in enumerate(poster_paths) if p is not None]
 
-        if len(valid) == 1:
-            return valid[0]
+    def number_posters(self, raw: list[tuple[int, Path]]) -> list[Path]:
+        """Add number overlays to pre-downloaded posters. Returns numbered paths."""
+        numbered: list[Path] = []
+        for idx, path in raw:
+            out = self._add_number_overlay(path, idx)
+            if out:
+                numbered.append(out)
+        self._cleanup_temp_files()
+        return numbered
 
-        # Open images and resize to same height
-        target_height = 750
-        images: list[tuple[int, Image.Image]] = []
-        opened_images: list[Image.Image] = []
-        for idx, path in enumerate(valid):
-            raw_img = Image.open(path)
-            opened_images.append(raw_img)
-            img = raw_img.convert("RGB")
-            if img is not raw_img:
-                opened_images.append(img)
-            ratio = target_height / img.height
-            new_width = int(img.width * ratio)
-            resized = img.resize((new_width, target_height), Image.LANCZOS)
-            opened_images.append(resized)
-            images.append((idx, resized))
-
+    def _add_number_overlay(self, poster_path: Path, number: int) -> Path | None:
+        """Copy a poster with a numbered circle overlay in the top-left corner."""
         try:
-            # Stitch side-by-side with small gap
-            gap = 10
-            total_width = sum(img.width for _, img in images) + gap * (len(images) - 1)
-            collage = Image.new("RGB", (total_width, target_height), (30, 30, 30))
+            img = Image.open(poster_path).convert("RGB")
+            draw = ImageDraw.Draw(img)
 
-            x_offset = 0
-            draw = ImageDraw.Draw(collage)
-
-            # Try to load a font, fall back to default
+            circle_r = max(20, img.width // 10)
+            font_size = int(circle_r * 1.6)
             try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 48)
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
             except (OSError, IOError):
                 font = ImageFont.load_default()
 
-            for idx, img in images:
-                collage.paste(img, (x_offset, 0))
+            cx, cy = 15, 15
+            draw.ellipse(
+                [cx, cy, cx + circle_r * 2, cy + circle_r * 2],
+                fill=(0, 0, 0),
+            )
+            text = str(number)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(
+                (cx + circle_r - tw // 2, cy + circle_r - th // 2),
+                text, fill="white", font=font,
+            )
 
-                # Draw number overlay
-                number = str(idx + 1)
-                # Black circle background
-                circle_x = x_offset + 20
-                circle_y = 20
-                circle_r = 30
-                draw.ellipse(
-                    [circle_x, circle_y, circle_x + circle_r * 2, circle_y + circle_r * 2],
-                    fill=(0, 0, 0),
-                )
-                # White number
-                bbox = draw.textbbox((0, 0), number, font=font)
-                text_w = bbox[2] - bbox[0]
-                text_h = bbox[3] - bbox[1]
-                draw.text(
-                    (circle_x + circle_r - text_w // 2, circle_y + circle_r - text_h // 2),
-                    number,
-                    fill="white",
-                    font=font,
-                )
+            out_path = self.poster_dir / f"numbered_{number}_{int(time.time())}.jpg"
+            img.save(out_path, "JPEG", quality=85)
+            img.close()
+            return out_path
+        except Exception as e:
+            log.error("Failed to number poster %s: %s", poster_path, e)
+            return None
 
-                x_offset += img.width + gap
-
-            # Save collage
-            collage_path = self.poster_dir / f"collage_{int(time.time())}.jpg"
-            collage.save(collage_path, "JPEG", quality=85)
-            log.info("Created collage: %s", collage_path)
-
-            # Close collage image
-            collage.close()
-
-            # Clean up old collage files (older than 24 hours)
-            self._cleanup_old_collages()
-
-            return collage_path
-        finally:
-            # Close all opened images
-            for img in opened_images:
-                img.close()
-
-    def _cleanup_old_collages(self, max_age_hours: int = 24) -> None:
-        """Delete collage files older than max_age_hours."""
+    def _cleanup_temp_files(self, max_age_hours: int = 24) -> None:
+        """Delete temporary poster files (collages, numbered) older than max_age_hours."""
         cutoff = time.time() - max_age_hours * 3600
-        for path in self.poster_dir.glob("collage_*.jpg"):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-                    log.debug("Cleaned up old collage: %s", path)
-            except OSError as e:
-                log.debug("Failed to clean up collage %s: %s", path, e)
+        for pattern in ("collage_*.jpg", "numbered_*.jpg"):
+            for path in self.poster_dir.glob(pattern):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        log.debug("Cleaned up: %s", path)
+                except OSError as e:
+                    log.debug("Failed to clean up %s: %s", path, e)
 
     async def close(self) -> None:
         await self.client.aclose()

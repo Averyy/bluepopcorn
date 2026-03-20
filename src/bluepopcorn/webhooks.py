@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from typing import Callable, Coroutine
@@ -23,6 +24,7 @@ class WebhookServer:
                              string to send to all allowed senders.
         """
         self.port = settings.webhook_port
+        self._secret = settings.webhook_secret
         self.on_notification = on_notification
         self._server: asyncio.Server | None = None
 
@@ -36,6 +38,10 @@ class WebhookServer:
         self._server = await asyncio.start_server(
             self._handle_connection_wrapper, "127.0.0.1", self.port
         )
+        if not self._secret:
+            log.warning(
+                "WEBHOOK_SECRET not set — webhook endpoint has no auth"
+            )
         log.info("Webhook server listening on port %d", self.port)
 
     async def _handle_connection_wrapper(
@@ -97,8 +103,13 @@ class WebhookServer:
             path = parts[1] if len(parts) > 1 else ""
 
             if method == "POST" and path == "/webhook":
-                await self._handle_webhook(body)
-                response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+                if self._secret and not self._verify_signature(
+                    headers, body
+                ):
+                    response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 12\r\n\r\nUnauthorized"
+                else:
+                    await self._handle_webhook(body)
+                    response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
             else:
                 response = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"
 
@@ -109,6 +120,16 @@ class WebhookServer:
         finally:
             writer.close()
             await writer.wait_closed()
+
+    def _verify_signature(
+        self, headers: dict[str, str], body: bytes
+    ) -> bool:
+        """Validate the webhook secret.
+
+        Seerr sends the secret as a raw ``Authorization`` header value.
+        """
+        auth = headers.get("authorization", "")
+        return hmac.compare_digest(auth, self._secret)
 
     async def _handle_webhook(self, body: bytes) -> None:
         """Parse Seerr webhook payload and send notification."""

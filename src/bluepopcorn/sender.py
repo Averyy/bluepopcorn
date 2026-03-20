@@ -180,13 +180,17 @@ end tell
         """
         if self._send_lock.locked():
             return
+        phone = self._sanitize_phone(phone)
         script = f'''
 tell application "Messages" to activate
 delay 0.3
 open location "imessage://{phone}"
-delay 0.5
+delay 0.7
 tell application "System Events"
     tell process "Messages"
+        keystroke "a" using command down
+        key code 51
+        delay 0.1
         keystroke "."
     end tell
 end tell
@@ -336,6 +340,55 @@ end tell
                     return True
             log.error("Failed to send image to %s after %d retries + restart", phone, retries)
             return False
+
+    async def send_images(self, phone: str, image_paths: list[str], retries: int = 3) -> bool:
+        """Send multiple images via iMessage with 1s delays for iOS stacking.
+
+        Images must be in ~/Pictures/ due to Messages.app sandbox restriction.
+        Sends are held under a single lock to prevent interleaving.
+        """
+        pictures_dir = str(Path.home() / "Pictures")
+        for path in image_paths:
+            resolved = str(Path(path).resolve())
+            if not resolved.startswith(pictures_dir + "/") and resolved != pictures_dir:
+                log.error("Image path %s is not in ~/Pictures/, refusing to send", path)
+                return False
+
+        if not await self._ensure_messages_running():
+            log.error("Cannot send images: Messages.app not available")
+            return False
+
+        async with self._send_lock:
+            for i, image_path in enumerate(image_paths):
+                sent = False
+                for attempt in range(retries):
+                    script = self._build_send_image_script(phone, image_path)
+                    success, error = await self._run_applescript(script)
+                    if success:
+                        log.info("Sent image %d/%d to %s", i + 1, len(image_paths), phone)
+                        sent = True
+                        break
+                    backoff = 2 ** attempt
+                    log.warning(
+                        "Image send failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, retries, backoff, error,
+                    )
+                    await self._dismiss_error_dialogs()
+                    await asyncio.sleep(backoff)
+                if not sent:
+                    if await self._restart_messages():
+                        script = self._build_send_image_script(phone, image_path)
+                        success, error = await self._run_applescript(script)
+                        if success:
+                            log.info("Sent image %d/%d to %s after restart", i + 1, len(image_paths), phone)
+                            sent = True
+                    if not sent:
+                        log.error("Failed to send image %d/%d to %s after %d retries + restart", i + 1, len(image_paths), phone, retries)
+                        return False
+                # 1s delay between images for iOS stacking
+                if i < len(image_paths) - 1:
+                    await asyncio.sleep(1)
+        return True
 
     def _chunk_message(self, message: str) -> list[str]:
         """Split a message into chunks at word boundaries."""

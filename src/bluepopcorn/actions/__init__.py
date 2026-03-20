@@ -5,21 +5,22 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import time
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
-from ..db import BotDatabase
 from ..llm import LLMClient
+from ..memory import UserMemory
+from ..monitor import MessageMonitor
 from ..posters import PosterHandler
 from ..seerr import SeerrClient
 from ..sender import MessageSender
-from ..types import Action, LLMDecision, SearchResult
-from ._base import ERROR_GENERIC, StatusData, resolve_request_title, apply_ratings
+from ..types import Action, HistoryEntry, LLM_RESPOND_SCHEMA, LLMDecision, SearchResult
+from ._base import ERROR_GENERIC, apply_ratings
 
 # Handler imports
 from .search import handle_search
 from .request import handle_request
-from .status import handle_check_status
 from .recent import handle_recent
 from .recommend import handle_recommend
 from .memory import handle_remember, handle_forget
@@ -30,6 +31,11 @@ log = logging.getLogger(__name__)
 __all__ = ["ActionExecutor", "ERROR_GENERIC"]
 
 
+def _escape_xml_delimiters(text: str) -> str:
+    """Escape angle brackets to prevent prompt injection via fake XML tags."""
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
 class ActionExecutor:
     def __init__(
         self,
@@ -37,17 +43,63 @@ class ActionExecutor:
         llm: LLMClient,
         sender: MessageSender | None,
         posters: PosterHandler | None,
-        db: BotDatabase,
+        memory: UserMemory,
+        monitor: MessageMonitor | None,
         settings: Settings,
     ) -> None:
         self.seerr = seerr
         self.llm = llm
         self.sender = sender
         self.posters = posters
-        self.db = db
+        self.memory = memory
+        self.monitor = monitor
         self.settings = settings
         # Track recently sent poster tmdb_ids per phone to avoid re-sending
         self._sent_posters: dict[str, set[int]] = {}
+        # In-memory context buffer (search results, API data) per sender
+        self._context: dict[str, list[tuple[float, str]]] = {}
+        # Most recently discussed title per sender (for pronoun resolution)
+        # Values: {"title": str, "tmdb_id": int, "media_type": str}
+        self._last_topic: dict[str, dict] = {}
+        # Session boundary timestamps (set by "new"/"reset")
+        self._session_start: dict[str, float] = {}
+        # CLI-mode message history (no chat.db available)
+        self._cli_history: dict[str, list[HistoryEntry]] = {}
+        # Cached base prompt per sender (within a single handle_message cycle)
+        self._prompt_cache: dict[str, str] = {}
+        # Context count at cache time (to append only new entries in _llm_respond)
+        self._prompt_cache_ctx_count: dict[str, int] = {}
+        # Whether the most recent prompt had a conversation gap (stale topic)
+        self._has_gap: dict[str, bool] = {}
+
+    # ── Context buffer helpers ───────────────────────────────────
+
+    def _add_context(self, sender: str, text: str) -> None:
+        """Add a context entry to the in-memory buffer."""
+        entries = self._context.setdefault(sender, [])
+        entries.append((time.time(), text))
+        if len(entries) > 50:
+            self._context[sender] = entries[-50:]
+
+    def _clear_context(self, sender: str) -> None:
+        """Clear context buffer for a sender."""
+        self._context.pop(sender, None)
+
+    def get_context_entries(self, sender: str) -> list[tuple[float, str]]:
+        """Return context entries for a sender (for handler use)."""
+        return self._context.get(sender, [])
+
+    # ── CLI history helper ───────────────────────────────────────
+
+    def _track_cli(self, sender: str, role: str, content: str) -> None:
+        """Append to CLI-mode history (no-op in daemon mode)."""
+        if self.monitor is not None:
+            return
+        self._cli_history.setdefault(sender, []).append(
+            HistoryEntry(role=role, content=content, timestamp=time.time())
+        )
+
+    # ── Main entry point ─────────────────────────────────────────
 
     async def handle_message(
         self,
@@ -55,160 +107,126 @@ class ActionExecutor:
         text: str,
     ) -> str:
         """Process a user message through the full LLM -> action -> response loop."""
-        # Check bypass commands first
-        bypass = self._check_bypass(text)
-        if bypass is not None:
-            await self.db.add_history(sender_phone, "user", text)
-            response = await self._handle_bypass(bypass, sender_phone)
-            await self.db.add_history(sender_phone, "assistant", response)
-            return response
+        self._track_cli(sender_phone, "user", text)
 
-        # Save user message to history
-        await self.db.add_history(sender_phone, "user", text)
-
-        # Build prompt from conversation history
+        # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
+        # Mark the current message with a strong delimiter so the LLM focuses on it
+        # (chat.db history can be noisy with old conversations)
+        prompt += (
+            "\n---\n"
+            "[CURRENT MESSAGE — respond to this. Everything above is history for context only.]\n"
+            f"<current_user_message>{_escape_xml_delimiters(text)}</current_user_message>"
+        )
+        # Inject last-discussed topic so the LLM knows what "it" refers to
+        # Includes tmdb_id + media_type so the LLM can request directly
+        # Skip if a conversation gap was detected (stale topic from old conversation)
+        topic = self._last_topic.get(sender_phone)
+        if topic and not self._has_gap.get(sender_phone, False):
+            safe_title = _escape_xml_delimiters(topic["title"])
+            prompt += f"\n[Last discussed title: {safe_title} tmdb:{topic['tmdb_id']} {topic['media_type']}]"
+        self._prompt_cache[sender_phone] = prompt
+        self._prompt_cache_ctx_count[sender_phone] = len(self._context.get(sender_phone, []))
 
         # Get LLM decision
         try:
             decision, meta = await self.llm.decide(prompt)
-            log.info("LLM action=%s query=%s", decision.action.value, decision.query or "-")
+            log.info("LLM action=%s query=%s tmdb_id=%s", decision.action.value, decision.query or "-", decision.tmdb_id or "-")
         except Exception as e:
             log.error("LLM call failed: %s", e)
-            return "Something went wrong on my end, try again in a sec."
+            self._prompt_cache.pop(sender_phone, None)
+            self._prompt_cache_ctx_count.pop(sender_phone, None)
+            return "Server error, please try again later."
 
         # Execute the action
-        response = await self._execute(decision, sender_phone)
-
-        # Save assistant response to history
-        await self.db.add_history(sender_phone, "assistant", response)
+        try:
+            response = await self._execute(decision, sender_phone, text)
+        finally:
+            # Clear prompt cache after message is fully handled (or on error)
+            self._prompt_cache.pop(sender_phone, None)
+            self._prompt_cache_ctx_count.pop(sender_phone, None)
+        self._track_cli(sender_phone, "assistant", response)
 
         return response
 
-    def _check_bypass(self, text: str) -> str | None:
-        """Check if the message is a bypass command."""
-        lower = text.strip().lower()
-        if lower in ("status", "pending"):
-            return "status"
-        if lower in ("new", "reset", "clear"):
-            return "new"
-        if lower == "help":
-            return "help"
-        return None
+    async def _llm_respond(self, sender_phone: str, fallback: str = "", intent: str | None = None) -> tuple[str, bool]:
+        """Build prompt with current context and let the LLM generate a response.
 
-    async def _handle_bypass(self, command: str, sender_phone: str = "") -> str:
-        """Handle a bypass command directly (no LLM)."""
-        if command == "status":
-            try:
-                data = await self._fetch_status_data()
-                if not data.has_activity:
-                    return "No pending or in-progress requests."
+        Reuses the cached base prompt from handle_message when available,
+        appending only the new context entries added by the handler.
 
-                lines: list[str] = []
-                if data.processing_titles:
-                    lines.append("Downloading:")
-                    for title in data.processing_titles:
-                        lines.append(f"- {title}")
-                if data.pending_titles:
-                    lines.append("Waiting for approval:")
-                    for title in data.pending_titles:
-                        lines.append(f"- {title}")
-                if data.recently_added:
-                    lines.append("Recently added:")
-                    for title in data.recently_added:
-                        lines.append(f"- {title}")
-
-                return "\n".join(lines) if lines else "No pending or in-progress requests."
-            except Exception as e:
-                log.error("Status check failed: %s", e)
-                return ERROR_GENERIC
-
-        if command == "new":
-            if sender_phone:
-                await self.db.clear_history(sender_phone)
-                self._sent_posters.pop(sender_phone, None)
-            return "Fresh start. What's up?"
-
-        if command == "help":
-            return (
-                "Things I can do:\n"
-                "- Add movies/shows (e.g. 'add severance')\n"
-                "- Tell you about a title ('what's Bugonia about?')\n"
-                "- What's new on the server ('what's been added?')\n"
-                "- Remember things ('remember I like sci-fi')\n"
-                "- 'status' - check pending requests\n"
-                "- 'new' or 'reset' - fresh conversation\n"
-                "- 'help' - this message"
+        ``intent`` controls the LLM instruction style:
+        - "search": focus on top result, describe it
+        - "disambiguate": present numbered options, ask which one
+        - "recommend": present numbered picks, ask if they want to add any
+        - "recent": present server state (available + requested/downloading)
+        - None: generic summarize
+        """
+        cached = self._prompt_cache.get(sender_phone)
+        if cached is not None:
+            # Append only context entries added since the cache was built
+            cache_count = self._prompt_cache_ctx_count.get(sender_phone, 0)
+            new_ctx = self._context.get(sender_phone, [])[cache_count:]
+            extra = "\n".join(f"<context>{text}</context>" for _ts, text in new_ctx)
+            prompt = cached + "\n" + extra if extra else cached
+        else:
+            prompt = await self._build_prompt(sender_phone)
+        base = (
+            "The results above have already been fetched. "
+            "Do NOT search, recommend, or take any action. "
+            "Use action=reply. If the user is confirming they want to add a title "
+            "shown in the results, you may use action=request with the correct tmdb_id and media_type. "
+            "Set multiple_results=true if you are presenting multiple numbered options, "
+            "false if focusing on a single title."
+        )
+        if intent == "search":
+            instruction = (
+                f"{base} Present the search results to the user. "
+                "If there's one clear match for what the user asked, focus on it — "
+                "describe it, mention ratings, and note its status. "
+                "If there are multiple plausible matches, present them numbered and ask which one. "
+                "Use your judgment based on the query and results."
             )
-
-        return "Unknown command."
-
-    async def _fetch_status_data(self) -> StatusData:
-        """Fetch processing/pending/recently-added data from Seerr."""
-        counts = await self.seerr.get_request_count()
-        fetch_processing = counts.get("processing", 0) > 0
-        fetch_pending = counts.get("pending", 0) > 0
-
-        # Gather only the requests that exist
-        coros = {}
-        if fetch_processing:
-            coros["processing"] = self.seerr.get_processing()
-        if fetch_pending:
-            coros["pending"] = self.seerr.get_pending()
-        coros["recent"] = self.seerr.get_recently_added(take=3)
-
-        keys = list(coros.keys())
-        results = await asyncio.gather(*coros.values())
-        fetched = dict(zip(keys, results))
-
-        processing = fetched.get("processing", [])
-        pending = fetched.get("pending", [])
-        recently_added = fetched.get("recent", [])
-
-        # Resolve titles concurrently
-        all_reqs = list(processing[:5]) + list(pending[:5])
-        if all_reqs:
-            titles = await asyncio.gather(
-                *[resolve_request_title(req, self.seerr) for req in all_reqs]
+        elif intent == "recommend":
+            instruction = (
+                f"{base} Present these as numbered picks for the user to browse. "
+                "Mention ALL results shown with brief descriptions. "
+                "End with asking if they want to add any."
+            )
+        elif intent == "recent":
+            instruction = (
+                f"{base} Present the server state. Group by what's available and what's been requested. "
+                "Use the exact status from the results. Include brief descriptions."
+            )
+        elif intent == "dedup":
+            instruction = (
+                f"{base} The user wanted to add this title but it's already on the server. "
+                "Inform them of its current status naturally."
             )
         else:
-            titles = []
-        proc_count = min(len(processing), 5)
-
-        proc_titles = [t for t in titles[:proc_count] if t != "Unknown"]
-        pend_titles = [t for t in titles[proc_count:] if t != "Unknown"]
-        added_titles = [item["title"] for item in recently_added[:3]]
-
-        return StatusData(
-            processing_titles=proc_titles,
-            pending_titles=pend_titles,
-            recently_added=added_titles,
-        )
-
-    async def _llm_respond(self, sender_phone: str, fallback: str = "") -> str:
-        """Build prompt with current history and let the LLM generate a response."""
-        prompt = await self._build_prompt(sender_phone)
-        prompt += "\n<context>[The results above have already been fetched and sent. Your job now is only to write the reply message. Respond with action=reply.]</context>"
+            instruction = f"{base} Write a reply message summarizing the results."
+        prompt += f"\n---\n[INSTRUCTION: {instruction}]"
         try:
-            decision, meta = await self.llm.decide(prompt)
+            decision, meta = await self.llm.decide(prompt, schema=LLM_RESPOND_SCHEMA)
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
+            multi = decision.multiple_results
             # Allow request as a follow-up (user confirms a search result)
             if decision.action == Action.REQUEST and decision.tmdb_id:
-                return await handle_request(self, decision, sender_phone)
+                return await handle_request(self, decision, sender_phone), multi
             # Only accept reply — any other action means the LLM is confused
             if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
-                return decision.message
+                return decision.message, multi
             log.warning(
                 "LLM response returned action=%s message=%r instead of reply, using fallback",
                 decision.action.value, (decision.message or "")[:100],
             )
-            return fallback or ERROR_GENERIC
+            return fallback or ERROR_GENERIC, False
         except Exception as e:
             log.error("LLM response call failed: %s", e)
-            return fallback or ERROR_GENERIC
+            return fallback or ERROR_GENERIC, False
 
     async def _build_prompt(self, sender_phone: str) -> str:
-        """Build the full prompt from conversation history."""
+        """Build the full prompt from memory + chat.db messages + context buffer."""
         parts: list[str] = []
 
         # Time context
@@ -217,29 +235,66 @@ class ActionExecutor:
         time_str = now.strftime("%A %B %-d, %Y %-I:%M %p %Z")
         parts.append(f"<context>[Current time: {time_str}]</context>")
 
-        # User memory (stored facts)
-        facts = await self.db.get_facts(sender_phone)
-        if facts:
-            memory_lines = "\n".join(f"- {f}" for f in facts)
-            parts.append(f"<memory>\n{memory_lines}\n</memory>")
+        # Per-user memory (markdown file) — run in thread to avoid blocking event loop
+        memory_content = await asyncio.to_thread(self.memory.load, sender_phone)
+        if memory_content:
+            parts.append(f"<memory>\n{memory_content.strip()}\n</memory>")
 
-        # Conversation history
-        history = await self.db.get_history(sender_phone)
-        for entry in history:
-            if entry.role == "user":
-                parts.append(f"<user>{entry.content}</user>")
-            elif entry.role == "assistant":
-                parts.append(f"<assistant>{entry.content}</assistant>")
-            elif entry.role == "context":
-                parts.append(f"<context>{entry.content}</context>")
+        # Get messages: chat.db in daemon mode, _cli_history in CLI mode
+        if self.monitor is not None:
+            messages = await self.monitor.get_recent_messages(
+                sender_phone,
+                limit=self.settings.history_window,
+            )
+        else:
+            messages = list(self._cli_history.get(sender_phone, []))
+
+        # Filter by session start (messages after "new"/"reset" only)
+        session_start = self._session_start.get(sender_phone)
+        if session_start is not None:
+            messages = [m for m in messages if m.timestamp >= session_start]
+
+        # Merge messages + context buffer by timestamp (evict stale context)
+        context_entries = self._context.get(sender_phone, [])
+        gap_seconds = self.settings.conversation_gap_hours * 3600
+        now = time.time()
+        timeline: list[tuple[float, str, str]] = []  # (timestamp, tag, content)
+        for m in messages:
+            timeline.append((m.timestamp, m.role, m.content))
+        for ts, text in context_entries:
+            if now - ts > gap_seconds * 2:
+                continue  # Evict context entries older than 2x gap threshold
+            if session_start is None or ts >= session_start:
+                timeline.append((ts, "context", text))
+        timeline.sort(key=lambda x: x[0])
+
+        msg_count = sum(1 for _, tag, _ in timeline if tag in ("user", "assistant"))
+        ctx_count = sum(1 for _, tag, _ in timeline if tag == "context")
+        log.debug(
+            "Prompt for %s: %d messages, %d context entries, memory=%s",
+            sender_phone, msg_count, ctx_count, bool(memory_content),
+        )
+
+        # Render with gap markers for 2+ hour gaps
+        prev_ts = 0.0
+        has_gap = False
+        for ts, tag, content in timeline:
+            if prev_ts > 0 and ts - prev_ts >= gap_seconds:
+                parts.append("[The above messages are from a previous conversation. Treat the following as a new, separate conversation — do not assume topic continuity.]")
+                has_gap = True
+            safe = _escape_xml_delimiters(content)
+            parts.append(f"<{tag}>{safe}</{tag}>")
+            prev_ts = ts
+
+        self._has_gap[sender_phone] = has_gap
 
         return "\n".join(parts)
 
     async def _enrich_results(
         self, results: list[SearchResult], *, enrich_downloads: bool = False
     ) -> None:
-        """Fetch trailers, ratings, air dates, and optionally download progress for top results."""
-        top = results[:3]
+        """Fetch trailers, ratings, air dates, and optionally download progress for results."""
+        top = results
         detail_tasks = [self.seerr.get_detail_extras(r.media_type, r.tmdb_id) for r in top]
         rating_tasks = [self.seerr.get_ratings(r.media_type, r.tmdb_id) for r in top]
         n = len(top)
@@ -259,14 +314,14 @@ class ActionExecutor:
             if rating_dict and i < len(results):
                 apply_ratings(results[i], rating_dict)
 
-    async def _execute(self, decision: LLMDecision, sender_phone: str) -> str:
+    async def _execute(
+        self, decision: LLMDecision, sender_phone: str, user_text: str = ""
+    ) -> str:
         """Execute an LLM decision and return the response text."""
         if decision.action == Action.SEARCH:
-            return await handle_search(self, decision, sender_phone)
+            return await handle_search(self, decision, sender_phone, user_text)
         elif decision.action == Action.REQUEST:
             return await handle_request(self, decision, sender_phone)
-        elif decision.action == Action.CHECK_STATUS:
-            return await handle_check_status(self, decision, sender_phone)
         elif decision.action == Action.RECENT:
             return await handle_recent(self, decision, sender_phone)
         elif decision.action == Action.RECOMMEND:
@@ -276,64 +331,78 @@ class ActionExecutor:
         elif decision.action == Action.FORGET:
             return await handle_forget(self, decision, sender_phone)
         else:  # REPLY
-            return decision.message
+            if decision.message and decision.message.strip():
+                return decision.message.strip()
+            executor._add_context(sender_phone, "[Reply action: LLM returned empty message]")
+            return (await self._llm_respond(sender_phone, intent=None))[0]
 
-    async def _send_single_poster(
-        self, phone: str, result: SearchResult
-    ) -> None:
-        """Send a single poster for the top result."""
-        assert self.sender is not None
-        assert self.posters is not None
+    async def _prepare_poster(self, result: SearchResult):
+        """Download a single poster image. Returns local path or None."""
+        if not self.posters:
+            return None
         try:
-            poster = await self.posters.get_single_poster(result)
-            if poster:
-                await self.sender.send_image(phone, str(poster))
-                self._sent_posters.setdefault(phone, set()).add(result.tmdb_id)
+            return await self.posters.get_single_poster(result)
         except Exception as e:
-            log.error("Failed to send single poster: %s", e)
+            log.error("Failed to download poster: %s", e)
+            return None
 
-    async def _send_posters(
-        self, phone: str, results: list[SearchResult]
-    ) -> None:
-        """Download and send poster image(s)."""
-        assert self.sender is not None
-        assert self.posters is not None
+    async def _send_with_poster(
+        self,
+        sender_phone: str,
+        display_results: list[SearchResult],
+        *,
+        fallback: str,
+        intent: str,
+        skip_poster: bool = False,
+    ) -> str:
+        """Run LLM response in parallel with poster download, then send posters.
 
-        try:
-            if len(results) == 1:
-                poster = await self.posters.get_single_poster(results[0])
-                if poster:
-                    await self.sender.send_image(phone, str(poster))
-            else:
-                collage = await self.posters.create_collage(results)
-                if collage:
-                    await self.sender.send_image(phone, str(collage))
-            # Track all tmdb_ids that were shown
-            sent = self._sent_posters.setdefault(phone, set())
-            for r in results:
-                sent.add(r.tmdb_id)
-        except Exception as e:
-            log.error("Failed to send poster: %s", e)
+        Downloads raw posters in parallel with the LLM call. After the LLM
+        responds, decides single vs numbered posters based on the response:
+        - Recommendations always get numbered posters
+        - Search results: numbered if the LLM presented multiple options,
+          single poster if it focused on one result
+        """
+        sent_ids = self._sent_posters.get(sender_phone, set())
+        all_shown = all(r.tmdb_id in sent_ids for r in display_results) if display_results else True
 
-    async def _send_result_posters(
-        self, phone: str, results: list[SearchResult]
-    ) -> list[SearchResult]:
-        """Send poster(s) for results and restart typing indicator."""
-        if not self.sender or not self.posters:
-            return results
-        if len(results) > 1:
-            results_with_posters = [r for r in results if r.poster_path]
-            if results_with_posters:
-                results = results_with_posters
-            await self._send_posters(phone, results)
-        else:
-            await self._send_single_poster(phone, results[0])
-        await self.sender.start_typing(phone)
-        return results
+        # Start raw poster downloads in parallel with LLM (no numbering yet)
+        download_task = None
+        if not skip_poster and not all_shown and self.posters and self.sender and display_results:
+            download_task = asyncio.create_task(self.posters.download_all(display_results))
+
+        response, multi = await self._llm_respond(sender_phone, fallback=fallback, intent=intent)
+
+        if download_task:
+            try:
+                raw_posters = await download_task
+            except Exception as e:
+                log.error("Poster download failed: %s", e)
+                raw_posters = []
+            if raw_posters and self.sender:
+                if multi and len(raw_posters) > 1:
+                    numbered = self.posters.number_posters(raw_posters)
+                    if numbered:
+                        await self.sender.send_images(sender_phone, [str(p) for p in numbered])
+                else:
+                    # Single result focus — send first poster without numbering
+                    _, first_path = raw_posters[0]
+                    await self.sender.send_image(sender_phone, str(first_path))
+                await self.sender.start_typing(sender_phone)
+                new_sent = self._sent_posters.setdefault(sender_phone, set())
+                for r in display_results:
+                    new_sent.add(r.tmdb_id)
+
+        return response
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision
     ) -> None:
         """Store context about the requested/discussed title for future narrowing."""
         ctx = f"[Last discussed: {title} tmdb:{decision.tmdb_id} {decision.media_type}]"
-        await self.db.add_history(sender_phone, "context", ctx)
+        self._add_context(sender_phone, ctx)
+        self._last_topic[sender_phone] = {
+            "title": title,
+            "tmdb_id": decision.tmdb_id,
+            "media_type": decision.media_type,
+        }
