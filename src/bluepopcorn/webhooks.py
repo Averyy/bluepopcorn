@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 from typing import Callable, Coroutine
+from urllib.parse import urlparse
 
 from .config import Settings
 
@@ -25,6 +26,7 @@ class WebhookServer:
         """
         self.port = settings.webhook_port
         self._secret = settings.webhook_secret
+        self._allowed_ip = urlparse(settings.seerr_url).hostname or ""
         self.on_notification = on_notification
         self._server: asyncio.Server | None = None
 
@@ -36,19 +38,27 @@ class WebhookServer:
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
-            self._handle_connection_wrapper, "127.0.0.1", self.port
+            self._handle_connection_wrapper, "0.0.0.0", self.port
         )
         if not self._secret:
-            log.warning(
-                "WEBHOOK_SECRET not set — webhook endpoint has no auth"
+            log.info(
+                "WEBHOOK_SECRET not set — relying on IP filtering (Seerr: %s)",
+                self._allowed_ip,
             )
-        log.info("Webhook server listening on port %d", self.port)
+        log.info("Webhook server listening on port %d (allowed: %s)", self.port, self._allowed_ip)
 
     async def _handle_connection_wrapper(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_ip = peer[0] if peer else ""
+        if self._allowed_ip and peer_ip != self._allowed_ip:
+            log.warning("Rejected webhook connection from %s (expected %s)", peer_ip, self._allowed_ip)
+            writer.close()
+            await writer.wait_closed()
+            return
         try:
             await asyncio.wait_for(
                 self._handle_connection(reader, writer),

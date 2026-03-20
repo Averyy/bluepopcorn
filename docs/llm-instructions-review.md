@@ -766,8 +766,9 @@ INSTRUCTION = {
 
 
 # ─── Compression prompts ─────────────────────────────────────────
-# ─── Error message (when both LLM models fail) ──────────────────
-ERROR_GENERIC = "Something went wrong, try again in a sec."
+# ─── Error messages (sent directly to user) ──────────────────────
+# Used when: LLM call fails, API errors, action failures
+ERROR_GENERIC = "Something went wrong, try again in a sec."  # replaces current "Server error, please try again later."
 
 
 # ─── Compression prompts ─────────────────────────────────────────
