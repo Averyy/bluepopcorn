@@ -115,6 +115,84 @@ class MessageSender:
             return False, error
         return True, stdout.decode("utf-8", errors="ignore").strip()
 
+    def _build_gallery_script(self, phone: str, image_paths: list[str]) -> str:
+        """Build AppleScript to send multiple images as a grouped gallery.
+
+        Uses ASObjC bridge to put file URLs on NSPasteboard, then GUI-scripts
+        a Cmd+V paste + Return into Messages. Images arrive as a single
+        swipeable gallery on iOS.
+        """
+        safe_phone = self._sanitize_phone(phone)
+        url_lines = "\n".join(
+            f'    urls\'s addObject:(current application\'s |NSURL|\'s fileURLWithPath:"{self._escape_applescript(p)}")'
+            for p in image_paths
+        )
+        # Scale render delay with image count: 2s base + 0.3s per image beyond 2
+        render_delay = 2.0 + max(0, len(image_paths) - 2) * 0.3
+        return f'''use framework "AppKit"
+use scripting additions
+
+-- 1. Set clipboard to file URLs via NSPasteboard
+set pb to current application's NSPasteboard's generalPasteboard()
+pb's clearContents()
+set urls to current application's NSMutableArray's array()
+{url_lines}
+pb's writeObjects:urls
+
+-- 2. Open conversation
+tell application "Messages" to activate
+delay 0.3
+open location "imessage://{safe_phone}"
+delay 0.7
+
+-- 3. Clear compose, paste, wait for render, send
+tell application "System Events"
+    tell process "Messages"
+        keystroke "a" using command down
+        key code 51
+        delay 0.2
+        keystroke "v" using command down
+        delay {render_delay}
+        key code 36
+    end tell
+end tell
+'''
+
+    async def _send_images_gallery(self, phone: str, image_paths: list[str]) -> bool:
+        """Attempt to send images as a grouped gallery via clipboard+paste.
+
+        Returns True on success, False if the gallery approach failed
+        (caller should fall back to individual sends).
+        Assumes paths are already validated by send_images().
+        """
+        script = self._build_gallery_script(phone, image_paths)
+        # Longer timeout: script has ~3s+ of built-in delays
+        timeout = 15 + len(image_paths)
+        ok, err = await self._run_applescript(script, timeout=timeout)
+        if ok:
+            log.info("Sent %d images as gallery to %s", len(image_paths), phone)
+            return True
+        log.warning("Gallery send failed: %s", err)
+        return False
+
+    async def _clear_compose_field(self) -> None:
+        """Clear the Messages compose field (Cmd+A, Delete).
+
+        Used to clean up after a failed gallery paste before falling back
+        to individual sends.
+        """
+        script = '''
+tell application "System Events"
+    tell process "Messages"
+        keystroke "a" using command down
+        key code 51
+    end tell
+end tell
+'''
+        ok, _ = await self._run_applescript(script, timeout=5)
+        if ok:
+            log.debug("Compose field cleared")
+
     def _build_send_image_script(self, phone: str, image_path: str) -> str:
         """Build AppleScript to send an image file.
 
@@ -342,10 +420,11 @@ end tell
             return False
 
     async def send_images(self, phone: str, image_paths: list[str], retries: int = 3) -> bool:
-        """Send multiple images via iMessage with 1s delays for iOS stacking.
+        """Send multiple images via iMessage, grouped as a gallery when possible.
 
+        Tries clipboard+paste gallery first (images arrive as a single swipeable
+        group on iOS). Falls back to one-by-one sends if gallery fails.
         Images must be in ~/Pictures/ due to Messages.app sandbox restriction.
-        Sends are held under a single lock to prevent interleaving.
         """
         pictures_dir = str(Path.home() / "Pictures")
         for path in image_paths:
@@ -358,7 +437,15 @@ end tell
             log.error("Cannot send images: Messages.app not available")
             return False
 
+        # Try clipboard+paste gallery (grouped photos on iOS) — skip for single image
         async with self._send_lock:
+            if len(image_paths) >= 2 and await self._send_images_gallery(phone, image_paths):
+                return True
+            if len(image_paths) >= 2:
+                log.warning("Gallery send failed, falling back to individual sends")
+                await self._clear_compose_field()
+
+            # Fall back to one-by-one sends
             for i, image_path in enumerate(image_paths):
                 sent = False
                 for attempt in range(retries):

@@ -101,18 +101,18 @@ class SearchResult:
     @property
     def status_label(self) -> str:
         labels = {
-            MediaStatus.AVAILABLE: "available",
-            MediaStatus.PARTIALLY_AVAILABLE: "in your library",
-            MediaStatus.PROCESSING: "requested",
-            MediaStatus.PENDING: "requested, pending approval",
-            MediaStatus.UNKNOWN: "unknown",
-            MediaStatus.NOT_TRACKED: "not requested",
-            MediaStatus.BLOCKLISTED: "blocklisted",
-            MediaStatus.DELETED: "deleted",
+            MediaStatus.AVAILABLE: "available in library",
+            MediaStatus.PARTIALLY_AVAILABLE: "partially available in library",
+            MediaStatus.PROCESSING: "requested: waiting for release",
+            MediaStatus.PENDING: "requested: waiting for admin approval",
+            MediaStatus.UNKNOWN: "not in the library",
+            MediaStatus.NOT_TRACKED: "not in the library",
+            MediaStatus.BLOCKLISTED: "blocked/unable to download",
+            MediaStatus.DELETED: "not in the library",
         }
-        label = labels.get(self.status, "unknown")
+        label = labels.get(self.status, "not in the library")
         if self.status == MediaStatus.PROCESSING and self.download_progress:
-            label = f"downloading ({self.download_progress})"
+            label = f"currently downloading ({self.download_progress})"
         return label
 
 

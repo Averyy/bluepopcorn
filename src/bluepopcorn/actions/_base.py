@@ -99,24 +99,8 @@ def format_single_result(r: SearchResult) -> str:
     if r.trailer_url:
         parts.append(f"Trailer: {r.trailer_url}")
 
-    # Status-dependent ending
-    if r.status == MediaStatus.AVAILABLE:
-        parts.append("Already in your library.")
-    elif r.status == MediaStatus.PARTIALLY_AVAILABLE:
-        parts.append("Some of this is already available. Want me to request the rest?")
-    elif r.status == MediaStatus.PROCESSING:
-        if r.download_progress:
-            parts.append(f"Currently downloading ({r.download_progress}).")
-        else:
-            parts.append("Already requested, will download when available.")
-    elif r.status == MediaStatus.PENDING:
-        parts.append("Already requested, waiting on approval.")
-    elif r.status == MediaStatus.BLOCKLISTED:
-        parts.append("This title is blocklisted.")
-    elif r.status == MediaStatus.DELETED:
-        parts.append("This was previously deleted. Want me to re-request it?")
-    else:
-        parts.append("Want me to add it?")
+    # Status
+    parts.append(f"{r.status_label.capitalize()}.")
 
     return " ".join(parts)
 
