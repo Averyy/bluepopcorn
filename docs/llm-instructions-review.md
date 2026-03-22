@@ -170,18 +170,19 @@ These are structural strings injected into the user prompt that frame the conver
 ```
 [Last discussed title: Severance (2022) tmdb:95396 tv]
 ```
-**Suggested:** No change.
+**Note:** Title comes from `_last_topic["title"]`. Includes year when set by search/recommend/request handlers (e.g. `f"{top.title} ({top.year})"`), but NOT when set by `recent.py:62` (uses `first["title"]` from seerr dicts, no year) or by `_store_request_context` (uses `seerr_title()`, no year). See 2E for the related inconsistency.
+**Suggested:** Ensure all `_last_topic` setters include the year consistently.
 
 ## 2E. Request context marker
 
 **When:** After a successful request or dedup check, stored for future messages.
-**Source:** `__init__.py:402`
+**Source:** `__init__.py:450`
 **Currently:**
 ```
 [Last discussed: Severance tmdb:95396 tv]
 ```
-**Note:** This is slightly different from 2D — no year, different prefix. Gets added to context buffer and shows up in future prompts as a `<context>` entry.
-**Suggested:**
+**Note:** Two inconsistencies with 2D: (1) prefix is "Last discussed" not "Last discussed title", (2) title comes from `seerr_title(detail)` which is just the name (no year), whereas 2D stores `f"{top.title} ({top.year})"` with year. Gets added to context buffer and shows up in future prompts as a `<context>` entry.
+**Suggested:** Unify with 2D format. The `_store_request_context` method should append the year to the title before storing:
 ```
 [Last discussed title: {title} ({year}) tmdb:{id} {media_type}]
 ```
@@ -222,7 +223,7 @@ Requested:
 2. Hoppers (2026) [Movie] tmdb:456789 - A quantum physics adventure (Status: pending)
 ]
 ```
-**BUG: Status comes from:** `seerr.py:641,661` — raw `MediaStatus.name.lower()` (e.g. "available", "processing", "pending"). Does NOT use `status_label`. This is why the LLM sees "processing" and says "downloading".
+**BUG: Status comes from:** `seerr.py:649,669` — raw `MediaStatus.name.lower()` (e.g. "available", "processing", "pending"). `recent.py:40,51` passes these through as `item['status']` unchanged. Does NOT use `status_label`. This is why the LLM sees "processing" and says "downloading".
 **Implementation note:** `seerr.py` returns plain dicts, not `SearchResult` objects, so it can't call `status_label` directly. Fix: extract the label mapping from `status_label` into a standalone function in `types.py` (e.g. `status_label_for(MediaStatus)`) that both `SearchResult.status_label` and `seerr.py` can use.
 **Suggested:** Use labels from the STATUS LABELS table instead of raw enum names. Example corrected output:
 ```
@@ -246,28 +247,32 @@ Requested:
 [Request check: "Severance" is already downloading]
 [Request check: "Severance" is already requested, waiting on approval]
 ```
-**BUG:** "already downloading" for PROCESSING contradicts `status_label` ("requested: waiting for release"). Hardcoded, doesn't use `status_label`.
-**Note:** The "already" prefix is intentional context. The status portion after "already" uses labels from the STATUS LABELS table.
+**BUG:** Two mismatches with the STATUS LABELS table:
+- PROCESSING: code says `"already downloading"`, label says `"requested: waiting for release"`
+- PENDING: code says `"already requested, waiting on approval"`, label says `"requested: waiting for admin approval"` (different wording + comma vs colon)
+Hardcoded, doesn't use `status_label`.
+**Note:** The "already" prefix is intentional context. The status portion after "already" should match the STATUS LABELS table.
 **Suggested:** Use the dedup pattern from the STATUS LABELS table: `[Request check: "{title}" is already {label}]`
 
 ## 3D. Error/empty context strings
 
-**When:** Various failure cases. Each is a one-line context block.
-**Source:** Various handlers
+**When:** Various failure and edge cases. Each is a one-line context block.
+**Source:** Various handlers — listed per string below.
 **Currently:**
 ```
-[Search for "severance": search failed]
-[Search for "asdfghjkl": no results found]
-[Recommendations: no search criteria provided]
-[Recommendations for "sci-fi 2030": no results found]
-[Similar to "Xyzzy": couldn't find the base title]
-[Similar to "Severance": no recommendations found]
-[Recommendations similar to Severance]
-[Server state: no available or requested items found]
-[Remember action: no fact was provided]
-[Forget action: no keyword was provided]
-[Reply action: LLM returned empty message]
+[Search for "severance": search failed]              # search.py:29
+[Search for "asdfghjkl": no results found]           # search.py:36
+[Recommendations: no search criteria provided]       # recommend.py:134
+[Recommendations for "sci-fi 2030": no results found]  # recommend.py:163
+[Similar to "Xyzzy": couldn't find the base title]   # recommend.py:217
+[Similar to "Severance": no recommendations found]   # recommend.py:234
+[Recommendations similar to Severance]               # recommend.py:245 (success header, not an error)
+[Server state: no available or requested items found] # recent.py:27
+[Remember action: no fact was provided]              # memory.py:17
+[Forget action: no keyword was provided]             # memory.py:32
+[Reply action: LLM returned empty message]           # __init__.py:336
 ```
+**Note:** `[Recommendations similar to Severance]` is not an error — it's a success header injected before results in the similar-to flow. Grouped here because it's a context string, not a result format.
 **Suggested:** No change.
 
 ---
@@ -276,7 +281,7 @@ Requested:
 
 These are appended at the very end of the prompt as `[INSTRUCTION: ...]` to tell the LLM how to format its response. This is the part that's most broken — one confusing blob repeated everywhere.
 
-**Implementation note:** Currently 4A/4B/4C share one code path (intent="search"), 4D/4E/4F/4G/4H/4I share another (intent="recommend"), 4J/4K share one (intent="recent"), and 4M/4N share one (intent=None). Giving each scenario its own instruction means splitting these code paths — the handler needs to pass a more specific intent string so `_llm_respond` can pick the right instruction.
+**Implementation note:** Currently 4A/4B/4C share one code path (intent="search"), 4D/4E/4F/4G/4H/4I share another (intent="recommend"), 4J/4K share one (intent="recent"), 4L has its own (intent="dedup"), and 4M/4N share one (intent=None). Five distinct intents total. Giving each scenario its own instruction means splitting these code paths — the handler needs to pass a more specific intent string so `_llm_respond` can pick the right instruction.
 
 **What `multiple_results` controls:** This field determines poster behavior downstream. `true` = posters get numbered overlays and are sent as a gallery. `false` = a single poster is sent for the focused title. It does NOT affect the text response — only images.
 
@@ -563,9 +568,11 @@ Moved to the top of the document as the single source of truth. All 4 places (`t
 
 **Decision: Remove all Python fallback formatters.** When both LLM models fail, just send a generic error message instead of trying to format results in Python. The Python-formatted messages are confusing and inconsistent with the LLM's tone.
 
-**Currently:** `format_single_result()`, `format_multiple_results()`, `format_recommendations()` in `_base.py` build plain-text responses as a last resort.
+**Currently:** `format_single_result()`, `format_multiple_results()`, `format_recommendations()` in `_base.py` build plain-text responses as a last resort. There are also two hardcoded error strings sent directly to users when the LLM call itself fails:
+- `_base.py:11`: `ERROR_GENERIC = "Server error, please try again later."` (used as `fallback=` default)
+- `__init__.py:139`: `"Server error, please try again later."` (returned when call 1 throws an exception)
 
-**Suggested:** Delete all three functions. Replace all `fallback=` arguments in `_llm_respond` calls with the generic error from `prompts.py`:
+**Suggested:** Delete all three fallback formatters. Consolidate both error strings into one constant in `prompts.py`:
 
 ```python
 # In prompts.py
@@ -903,12 +910,21 @@ COMPRESSION_ROLLUP_SCHEMA = {
 }
 ```
 
+**Bug fixes included in this implementation:**
+
+1. **Status labels in recent context (BUG 3B):** `seerr.py:649,669` uses `status.name.lower()` producing raw enum names (`"processing"`, `"pending"`) that `recent.py:40,51` passes through to the LLM. Fix: `seerr.py` imports `STATUS_LABELS` from `prompts.py` and uses `STATUS_LABELS[status]` instead of `status.name.lower()`.
+
+2. **Dedup string inconsistency (BUG 3C):** `request.py:61-65` has hardcoded dedup strings that don't match STATUS LABELS — PROCESSING says `"already downloading"` (should be `"already requested: waiting for release"`), PENDING says `"already requested, waiting on approval"` (should be `"already requested: waiting for admin approval"`). Fix: `request.py` uses `CONTEXT_DEDUP.format(title=title, status=STATUS_LABELS[status])` instead of hardcoded strings.
+
+3. **Last discussed title inconsistency (BUG 2D/2E):** `_last_topic["title"]` sometimes includes year (set by search/recommend/request as `f"{top.title} ({top.year})"`), sometimes doesn't (set by `recent.py:62` from seerr dicts, and by `_store_request_context` from `seerr_title()`). Also, the context marker prefix differs: `"Last discussed title"` (2D, `__init__.py:127`) vs `"Last discussed"` (2E, `__init__.py:450`). Fix: all `_last_topic` setters include year. `_store_request_context` uses `LAST_DISCUSSED_TITLE` template from `prompts.py` with year included. Unify both markers to `[Last discussed title: {title} ({year}) tmdb:{id} {media_type}]`.
+
 **What changes in other files:**
-- `types.py`: `status_label` property imports `STATUS_LABELS` and `DOWNLOADING_LABEL` from `prompts.py`. Remove `LLM_JSON_SCHEMA` and `LLM_RESPOND_SCHEMA` (moved to `schemas.py`)
-- `seerr.py`: imports `STATUS_LABELS` for server state dicts instead of using `status.name.lower()`
-- `request.py`: imports `CONTEXT_DEDUP` template + `STATUS_LABELS` instead of hardcoded strings
-- `__init__.py`: imports `INSTRUCTION` dict, `LAST_DISCUSSED_TITLE`, `CONVERSATION_GAP`, etc. `_llm_respond` takes a scenario key instead of an intent string
-- `_base.py`: imports `STATUS_LABELS` for fallback formatters
+- `types.py`: add `status_label_for(MediaStatus) -> str` standalone function using `STATUS_LABELS` from `prompts.py`. `status_label` property delegates to it. Remove `LLM_JSON_SCHEMA` and `LLM_RESPOND_SCHEMA` (moved to `schemas.py`)
+- `seerr.py`: imports `status_label_for` from `types.py` for server state dicts instead of using `status.name.lower()` (fixes BUG 3B)
+- `request.py`: imports `CONTEXT_DEDUP` template + `STATUS_LABELS` instead of hardcoded strings (fixes BUG 3C)
+- `__init__.py`: imports `INSTRUCTION` dict, `LAST_DISCUSSED_TITLE`, `CONVERSATION_GAP`, etc. `_llm_respond` takes a scenario key instead of an intent string. `_store_request_context` uses `LAST_DISCUSSED_TITLE` with year (fixes BUG 2E)
+- `recent.py`: `_last_topic` setter includes year from `item.get("year")` (fixes BUG 2D for recent)
+- `_base.py`: delete `format_single_result`, `format_multiple_results`, `format_recommendations`. `ERROR_GENERIC` moves to `prompts.py`
 - `compression.py`: imports `COMPRESSION_*` prompts from `prompts.py` and `COMPRESSION_DAILY_SCHEMA` / `COMPRESSION_ROLLUP_SCHEMA` from `schemas.py`. Remove inline `COMPRESSION_SCHEMA`
 - `llm.py`: imports `DECIDE_SCHEMA` and `RESPOND_SCHEMA` from `schemas.py` instead of from `types.py`
 - `search.py`, `recommend.py`, `recent.py`, `memory.py`: import `CONTEXT_*` templates, pass specific scenario keys to `_llm_respond`

@@ -421,19 +421,31 @@ class ActionExecutor:
         poster_by_pos = {pos: path for pos, path in raw_posters}
 
         # Collect matches with their mention position in the response
-        # so posters are ordered the way the LLM presented them
+        # so posters are ordered the way the LLM presented them.
+        # Two passes: first find title+year matches (precise), then fill in
+        # title-only matches for titles that had no title+year hit. This
+        # prevents "Pressure (2026)" from matching all 5 results named "Pressure".
+        title_year_matched: set[str] = set()
         matches: list[tuple[int, Path]] = []  # (mention_idx, poster_path)
+        # Pass 1: title+year (precise)
         for i, r in enumerate(display_results):
-            pos = i + 1  # raw_posters uses 1-based indexing
+            pos = i + 1
+            if pos not in poster_by_pos:
+                continue
+            if r.year:
+                idx = response_lower.find(f"{r.title.lower()} ({r.year})")
+                if idx >= 0:
+                    title_year_matched.add(r.title.lower())
+                    matches.append((idx, poster_by_pos[pos]))
+        # Pass 2: title-only fallback (only for titles not already matched by year)
+        for i, r in enumerate(display_results):
+            pos = i + 1
             if pos not in poster_by_pos:
                 continue
             title_lower = r.title.lower()
-            idx = -1
-            if r.year:
-                idx = response_lower.find(f"{title_lower} ({r.year})")
-            if idx < 0:
-                # Fall back to title-only (handles LLM rephrasing)
-                idx = response_lower.find(title_lower)
+            if title_lower in title_year_matched:
+                continue  # already handled precisely by pass 1
+            idx = response_lower.find(title_lower)
             if idx >= 0:
                 matches.append((idx, poster_by_pos[pos]))
 
