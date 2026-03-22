@@ -358,10 +358,9 @@ class ActionExecutor:
         """Run LLM response in parallel with poster download, then send posters.
 
         Downloads raw posters in parallel with the LLM call. After the LLM
-        responds, decides single vs numbered posters based on the response:
-        - Recommendations always get numbered posters
-        - Search results: numbered if the LLM presented multiple options,
-          single poster if it focused on one result
+        responds, filters posters to only those the LLM actually mentioned
+        (by title match), renumbered sequentially. This prevents sending
+        posters for results the LLM chose to omit.
         """
         sent_ids = self._sent_posters.get(sender_phone, set())
         all_shown = all(r.tmdb_id in sent_ids for r in display_results) if display_results else True
@@ -380,12 +379,23 @@ class ActionExecutor:
                 log.error("Poster download failed: %s", e)
                 raw_posters = []
             if raw_posters and self.sender:
-                if multi and len(raw_posters) > 1:
-                    numbered = self.posters.number_posters(raw_posters)
-                    if numbered:
-                        await self.sender.send_images(sender_phone, [str(p) for p in numbered])
+                # Filter posters to only results the LLM actually mentioned
+                raw_posters = self._match_posters_to_response(
+                    response, display_results, raw_posters,
+                )
+                if len(raw_posters) > 1:
+                    if multi:
+                        # Numbered list — add number overlays
+                        numbered = self.posters.number_posters(raw_posters)
+                        if numbered:
+                            await self.sender.send_images(sender_phone, [str(p) for p in numbered])
+                    else:
+                        # Multiple titles mentioned but not a numbered list — send unnumbered
+                        await self.sender.send_images(
+                            sender_phone, [str(path) for _, path in raw_posters],
+                        )
                 else:
-                    # Single result focus — send first poster without numbering
+                    # Single result — send without numbering
                     _, first_path = raw_posters[0]
                     await self.sender.send_image(sender_phone, str(first_path))
                 await self.sender.start_typing(sender_phone)
@@ -394,6 +404,42 @@ class ActionExecutor:
                     new_sent.add(r.tmdb_id)
 
         return response
+
+    @staticmethod
+    def _match_posters_to_response(
+        response: str,
+        display_results: list[SearchResult],
+        raw_posters: list[tuple[int, Path]],
+    ) -> list[tuple[int, Path]]:
+        """Filter and renumber posters to only those the LLM mentioned.
+
+        Matches display_results titles against the LLM response text, then
+        returns only matching posters renumbered sequentially (1, 2, 3...).
+        Falls back to the full list if no titles match (safety net).
+        """
+        response_lower = response.lower()
+        poster_by_pos = {pos: path for pos, path in raw_posters}
+
+        matched: list[tuple[int, Path]] = []
+        new_num = 1
+        for i, r in enumerate(display_results):
+            pos = i + 1  # raw_posters uses 1-based indexing
+            if pos not in poster_by_pos:
+                continue
+            # Match "Title (Year)" first to disambiguate same-name titles,
+            # fall back to title-only if no year is available
+            title_lower = r.title.lower()
+            if r.year:
+                mentioned = f"{title_lower} ({r.year})" in response_lower
+            else:
+                mentioned = title_lower in response_lower
+            if mentioned:
+                matched.append((new_num, poster_by_pos[pos]))
+                new_num += 1
+
+        if not matched:
+            return raw_posters  # fallback: can't determine, send all
+        return matched
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision
