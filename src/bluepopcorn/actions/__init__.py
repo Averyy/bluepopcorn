@@ -420,26 +420,28 @@ class ActionExecutor:
         response_lower = response.lower()
         poster_by_pos = {pos: path for pos, path in raw_posters}
 
-        matched: list[tuple[int, Path]] = []
-        new_num = 1
+        # Collect matches with their mention position in the response
+        # so posters are ordered the way the LLM presented them
+        matches: list[tuple[int, Path]] = []  # (mention_idx, poster_path)
         for i, r in enumerate(display_results):
             pos = i + 1  # raw_posters uses 1-based indexing
             if pos not in poster_by_pos:
                 continue
-            # Match "Title (Year)" first to disambiguate same-name titles,
-            # fall back to title-only if no year is available
             title_lower = r.title.lower()
+            idx = -1
             if r.year:
-                mentioned = f"{title_lower} ({r.year})" in response_lower
-            else:
-                mentioned = title_lower in response_lower
-            if mentioned:
-                matched.append((new_num, poster_by_pos[pos]))
-                new_num += 1
+                idx = response_lower.find(f"{title_lower} ({r.year})")
+            if idx < 0:
+                # Fall back to title-only (handles LLM rephrasing)
+                idx = response_lower.find(title_lower)
+            if idx >= 0:
+                matches.append((idx, poster_by_pos[pos]))
 
-        if not matched:
+        if not matches:
             return raw_posters  # fallback: can't determine, send all
-        return matched
+        # Sort by mention position so poster order matches LLM's text
+        matches.sort(key=lambda x: x[0])
+        return [(i + 1, path) for i, (_, path) in enumerate(matches)]
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision

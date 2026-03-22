@@ -199,11 +199,19 @@ class SeerrClient:
         year_match = re.search(r"\s+((?:19|20)\d{2})\s*$", query)
         want_year = int(year_match.group(1)) if year_match else None
 
-        # Strip filler words but keep the year in the search query —
-        # the year might be part of the title (e.g. "Blade Runner 2049", "2012")
+        # Strip filler words and the trailing year from the search query.
+        # TMDB treats years as title text ("Alexander 2004" matches a concert film).
+        # We search without the year and use it as a post-filter instead.
+        # If no results match the year (it's part of the title, e.g. "Blade Runner 2049"),
+        # we retry with the full query.
         cleaned = re.sub(r"\b(movie|film|tv|show|series)\b", "", query, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
-        search_query = cleaned or query
+        full_query = cleaned or query  # query with year intact (for retry)
+        search_query = full_query
+        if want_year:
+            stripped = re.sub(r"\s+(19|20)\d{2}\s*$", "", full_query).strip()
+            if stripped:  # don't strip if query IS the year (e.g. "2012")
+                search_query = stripped
 
         log.info("Seerr search: %s", search_query)
 
@@ -244,27 +252,27 @@ class SeerrClient:
                 filtered = [r for r in filtered if r.year == want_year]
             if filtered:
                 results = filtered
-            elif want_year and not results:
-                # Year in query produced no results — retry without it
-                # (handles "severance 2022" where 2022 is a filter, not part of the title)
-                stripped = re.sub(r"\s+(19|20)\d{2}\s*$", "", search_query).strip()
-                if stripped and stripped != search_query:
-                    log.info("Retrying without year: %s", stripped)
-                    resp = await self._try_search(stripped)
-                    data = resp.json()
-                    results = self._parse_results(data.get("results", []))
-                    # Re-apply type filters on new results (no fallback to wrong type)
-                    if want_movie and not want_tv:
-                        type_filtered = [r for r in results if r.media_type == "movie"]
-                        if type_filtered:
-                            results = type_filtered
-                    elif want_tv and not want_movie:
-                        type_filtered = [r for r in results if r.media_type == "tv"]
-                        if type_filtered:
-                            results = type_filtered
-                    year_filtered = [r for r in results if r.year == want_year]
-                    if year_filtered:
-                        results = year_filtered
+            elif want_year and search_query != full_query:
+                # Year filter found nothing — year may be part of the title
+                # (e.g. "Blade Runner 2049"). Retry with original query.
+                log.info("Year filter empty, retrying with full query: %s", full_query)
+                resp = await self._try_search(full_query)
+                data = resp.json()
+                raw_retry = data.get("results", [])
+                q_full = full_query.lower()
+                raw_retry.sort(key=lambda x: (
+                    _title_match_rank(x, q_full),
+                    -x.get("popularity", 0),
+                ))
+                results = self._parse_results(raw_retry)
+                if want_movie and not want_tv:
+                    type_filtered = [r for r in results if r.media_type == "movie"]
+                    if type_filtered:
+                        results = type_filtered
+                elif want_tv and not want_movie:
+                    type_filtered = [r for r in results if r.media_type == "tv"]
+                    if type_filtered:
+                        results = type_filtered
 
         log.info("Seerr search returned %d results", len(results))
         return results
