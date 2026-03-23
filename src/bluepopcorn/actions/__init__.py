@@ -13,6 +13,7 @@ from ..llm import LLMClient
 from ..memory import UserMemory
 from ..monitor import MessageMonitor
 from ..posters import PosterHandler
+from ..request_tracker import RequestTracker
 from ..seerr import SeerrClient
 from ..sender import MessageSender
 from ..prompts import (
@@ -55,6 +56,7 @@ class ActionExecutor:
         memory: UserMemory,
         monitor: MessageMonitor | None,
         settings: Settings,
+        request_tracker: RequestTracker | None = None,
     ) -> None:
         self.seerr = seerr
         self.llm = llm
@@ -63,6 +65,7 @@ class ActionExecutor:
         self.memory = memory
         self.monitor = monitor
         self.settings = settings
+        self.request_tracker = request_tracker
         # Track recently sent poster tmdb_ids per phone to avoid re-sending
         self._sent_posters: dict[str, set[int]] = {}
         # In-memory context buffer (search results, API data) per sender
@@ -187,7 +190,7 @@ class ActionExecutor:
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
             multi = decision.multiple_results
             # Allow request as a follow-up (user confirms a search result)
-            if decision.action == Action.REQUEST and decision.tmdb_id:
+            if decision.action == Action.REQUEST and (decision.tmdb_id or decision.collection_id):
                 return await handle_request(self, decision, sender_phone), multi
             # Only accept reply — any other action means the LLM is confused
             if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
@@ -287,6 +290,11 @@ class ActionExecutor:
                 results[i].next_air_date = extras["air_date"]
             if enrich_downloads and extras.get("download_progress"):
                 results[i].download_progress = extras["download_progress"]
+            if extras.get("collection_id"):
+                results[i].collection_id = extras["collection_id"]
+                results[i].collection_name = extras.get("collection_name")
+            if extras.get("season_count"):
+                results[i].season_count = extras["season_count"]
         for i, rating_dict in enumerate(ratings):
             if rating_dict and i < len(results):
                 apply_ratings(results[i], rating_dict)

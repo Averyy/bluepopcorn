@@ -130,9 +130,19 @@ async def handle_recommend(
             take=take, exclude_ids=shown_ids,
         )
 
+    if decision.upcoming:
+        if want_type != "tv":
+            coros["upcoming_movies"] = executor.seerr.discover_upcoming_movies(
+                take=take, exclude_ids=shown_ids,
+            )
+        if want_type != "movie":
+            coros["upcoming_tv"] = executor.seerr.discover_upcoming_tv(
+                take=take, exclude_ids=shown_ids,
+            )
+
     # Plain search as parallel strategy (catches title/keyword text matches)
     search_query = decision.query or decision.keyword or decision.genre or ""
-    label = genre_keyword or kw_query or ("trending" if is_trending else search_query)
+    label = genre_keyword or kw_query or ("upcoming" if decision.upcoming else "trending" if is_trending else search_query)
     if search_query:
         coros["search"] = executor.seerr.search(search_query, media_type=want_type)
 

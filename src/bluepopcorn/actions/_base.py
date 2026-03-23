@@ -51,10 +51,12 @@ def format_search_results(results: list[SearchResult], query: str | None = None)
             rating_str += f" | {ext_rating_str}" if rating_str else f" {ext_rating_str}"
         trailer_str = f" Trailer: {r.trailer_url}" if r.trailer_url else ""
         air_date_str = f" | Air date: {r.next_air_date}" if r.next_air_date else ""
+        season_str = f" | {r.season_count} season{'s' if r.season_count != 1 else ''}" if r.season_count else ""
+        collection_str = f" | Collection: {r.collection_name} (id: {r.collection_id})" if r.collection_name else ""
         lines.append(format_result_line(
             i, r.title, r.year, r.media_type, r.tmdb_id, r.overview,
             status_label_for(r.status, r.download_progress),
-            extras=f"{rating_str}{air_date_str}{trailer_str}",
+            extras=f"{rating_str}{air_date_str}{season_str}{collection_str}{trailer_str}",
         ))
     lines.append("]")
     return "\n".join(lines)

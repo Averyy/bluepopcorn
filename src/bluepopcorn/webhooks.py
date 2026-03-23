@@ -8,6 +8,7 @@ from typing import Callable, Coroutine
 from urllib.parse import urlparse
 
 from .config import Settings
+from .request_tracker import RequestTracker
 
 log = logging.getLogger(__name__)
 
@@ -16,18 +17,21 @@ class WebhookServer:
     def __init__(
         self,
         settings: Settings,
-        on_notification: Callable[[str], Coroutine],
+        on_notification: Callable[[str, str | None], Coroutine],
+        request_tracker: RequestTracker | None = None,
     ) -> None:
         """
         Args:
             settings: App settings.
-            on_notification: Async callback that receives a formatted message
-                             string to send to all allowed senders.
+            on_notification: Async callback(message, target_phone).
+                             target_phone is None for broadcast.
+            request_tracker: Optional tracker for targeted notifications.
         """
         self.port = settings.webhook_port
         self._secret = settings.webhook_secret
         self._allowed_ip = urlparse(settings.seerr_url).hostname or ""
         self.on_notification = on_notification
+        self._tracker = request_tracker
         self._server: asyncio.Server | None = None
 
     # Maximum allowed request body size (1 MB)
@@ -151,13 +155,12 @@ class WebhookServer:
 
         notification_type = data.get("notification_type", "")
         subject = data.get("subject", "")
-        message = data.get("message", "")
         media = data.get("media", {})
         title = media.get("tmdbTitle") or subject
 
         log.info("Webhook received: type=%s, title=%s", notification_type, title)
 
-        # Format notification based on type
+        # Format notification text (single source of truth per type)
         if notification_type == "MEDIA_APPROVED":
             text = f"{title} has been approved and is being downloaded."
         elif notification_type == "MEDIA_AVAILABLE":
@@ -169,8 +172,22 @@ class WebhookServer:
         else:
             text = f"Seerr: {subject}" if subject else None
 
-        if text:
-            await self.on_notification(text)
+        if not text:
+            return
+
+        # For available/failed: target the requester specifically, clean up tracker
+        tmdb_id = media.get("tmdbId")
+        media_type = media.get("mediaType")
+        if notification_type in ("MEDIA_AVAILABLE", "MEDIA_FAILED") and self._tracker and tmdb_id and media_type:
+            phones = await self._tracker.lookup(media_type, tmdb_id)
+            await self._tracker.remove(media_type, tmdb_id)
+            if phones:
+                for phone in phones:
+                    await self.on_notification(text, phone)
+                return
+
+        # Broadcast (approved, pending, or no tracker match)
+        await self.on_notification(text, None)
 
     async def stop(self) -> None:
         if self._server:

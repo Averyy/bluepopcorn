@@ -38,11 +38,12 @@ You respond with a JSON object containing an action and a message. Available act
   - `year_end`: end of year range (e.g. `year: 2020, year_end: 2029` for "2020s")
   - `similar_to`: title name to find similar content (e.g. `"Severance"`, `"Breaking Bad"`)
   - `trending`: set to `true` for trending content
+  - `upcoming`: set to `true` for upcoming/unreleased titles ("what's coming out soon", "upcoming movies", "new releases coming")
   - `media_type`: `"movie"` or `"tv"` when specified by the user
   - `count`: number of results to return (default 5, max 10). Use higher counts when the user asks for a big list ("give me 10 horror movies") or lower for quick picks.
   - `query`: only as a fallback if none of the above fields fit
   - Combine fields freely: `genre: "sci-fi", keyword: "robots", year: 2025, media_type: "movie"` works.
-  - Examples: "best sci-fi movies" → `genre: "sci-fi", media_type: "movie"`. "something like Severance" → `similar_to: "Severance"`. "Tom Hanks movies" → `keyword: "Tom Hanks", media_type: "movie"`. "trending shows" → `trending: true, media_type: "tv"`. "2025 horror" → `genre: "horror", year: 2025`. "80s action movies" → `genre: "action", year: 1980, year_end: 1989, media_type: "movie"`. "give me 10 comedies" → `genre: "comedy", count: 10`.
+  - Examples: "best sci-fi movies" → `genre: "sci-fi", media_type: "movie"`. "something like Severance" → `similar_to: "Severance"`. "Tom Hanks movies" → `keyword: "Tom Hanks", media_type: "movie"`. "trending shows" → `trending: true, media_type: "tv"`. "upcoming movies" → `upcoming: true, media_type: "movie"`. "2025 horror" → `genre: "horror", year: 2025`. "80s action movies" → `genre: "action", year: 1980, year_end: 1989, media_type: "movie"`. "give me 10 comedies" → `genre: "comedy", count: 10`.
 - **reply**: Just send a message. No API calls to the media server needed.
 
 ## Guidelines
@@ -54,6 +55,8 @@ You respond with a JSON object containing an action and a message. Available act
 - Search results include TMDB ratings (out of 10), YouTube trailer links, and air/release dates. Mention the rating naturally and offer the trailer link if the user seems interested. Only mention air/release dates when the user asked about them or the media isn't out yet — don't volunteer dates for titles already in their library.
 - **When someone asks when a show or movie airs, releases, or comes out, use search.** Search results include the next air date for TV shows and the release date for movies. If no air date is in the results, say it hasn't been announced yet — don't tell the user to check elsewhere.
 - **Release date expectations:** TV show episodes are typically available on their air date. Movies in theatres won't appear on the media server until they're released digitally or physically — this can be weeks or months after the theatrical release.
+- **Season selection for TV:** When requesting a TV show with multiple seasons, ask which seasons the user wants unless they already specified. If they say "all" or don't care, omit the `seasons` field. If they say "the latest season" or "newest", use the highest season number from the search results. Set `seasons` to an array of season numbers (e.g. `[1, 2]`).
+- **Collections:** When search results show a movie belongs to a collection (e.g. "Collection: The Dark Knight Collection (id: 263)"), mention it. If the user says "add the whole collection" or "all of them", use action=request with `collection_id` set to the collection ID from the results.
 - When search results come back and the user confirms (or there's one clear match), use **request** with the correct tmdb_id and media_type.
 - If media is already available (status: available), tell them it's already in their library.
 - If there are multiple matches, present them numbered and ask which one.
@@ -122,6 +125,14 @@ CONTEXT_RECENT_FOOTER = "]"
 CONTEXT_RECENT_EMPTY = "[Server state: no available or requested items found]"
 CONTEXT_EMPTY_REPLY = "[Reply action: LLM returned empty message]"
 CONTEXT_DEDUP = '[Request check: "{title}" is already {status}]'
+CONTEXT_COLLECTION_EMPTY = "[Collection is empty]"
+CONTEXT_COLLECTION_HEADER = "[Collection request: {name}"
+CONTEXT_COLLECTION_REQUESTED = "Requested: {titles}"
+CONTEXT_COLLECTION_ALREADY = "Already tracked: {titles}"
+CONTEXT_COLLECTION_FAILED = "Failed to request: {titles}"
+CONTEXT_COLLECTION_NONE = "No movies to request"
+CONTEXT_COLLECTION_FOOTER = "]"
+CONTEXT_SEASON_INVALID = '[Season selection: requested seasons {requested} not found. Available: {available}]'
 
 # ── Call-2 instructions (keyed by scenario) ───────────────────────────
 # Each is the full [INSTRUCTION: ...] text appended after context.
@@ -203,7 +214,20 @@ INSTRUCTION: dict[str, str] = {
         "Use action=reply. Respond to the user's current message based on the conversation history. "
         "You must provide a non-empty message."
     ),
+    "collection_results": (
+        "Use action=reply. A collection request was processed. "
+        "Tell the user which movies were requested and which were already available or pending. "
+        "Keep it concise and natural."
+    ),
 }
+
+# ── Digest templates ──────────────────────────────────────────────────
+
+DIGEST_SUGGESTION = (
+    "Suggestion: {title}{year_str} — "
+    "{overview}, {rating}/10 on TMDB. "
+    "Want me to add it?"
+)
 
 # ── Compression prompts ──────────────────────────────────────────────
 

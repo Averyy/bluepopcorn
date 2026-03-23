@@ -45,6 +45,9 @@ class LLMDecision:
     year_end: int | None = None  # end of year range (e.g. year=2020, year_end=2029 for "2020s")
     similar_to: str | None = None  # title name for "similar to X"
     trending: bool = False  # whether to show trending content
+    upcoming: bool = False  # whether to show upcoming releases
+    seasons: list[int] | None = None  # specific seasons to request for TV
+    collection_id: int | None = None  # TMDB collection ID for batch requests
     count: int | None = None  # number of results to return (default 5)
     page: int | None = None  # pagination for recent/server state
     multiple_results: bool = False  # LLM presenting multiple numbered options vs single focus
@@ -63,6 +66,9 @@ class LLMDecision:
             year_end=data.get("year_end"),
             similar_to=data.get("similar_to"),
             trending=data.get("trending", False),
+            upcoming=data.get("upcoming", False),
+            seasons=data.get("seasons"),
+            collection_id=data.get("collection_id"),
             count=data.get("count"),
             page=data.get("page"),
             multiple_results=data.get("multiple_results", False),
@@ -93,6 +99,9 @@ class SearchResult:
     download_progress: str | None = None  # e.g. "51%" when actively downloading
     next_air_date: str | None = None  # e.g. "S2E5 airs 2026-03-20" or "2026-07-04"
     from_person: bool = False  # True if result came from person search (actor/director credits)
+    season_count: int | None = None  # total number of seasons (TV only)
+    collection_id: int | None = None  # TMDB collection ID (movies only)
+    collection_name: str | None = None  # TMDB collection name (movies only)
 
 
 @dataclass

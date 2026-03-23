@@ -23,7 +23,9 @@ from .seerr import SeerrClient
 from .sender import MessageSender
 from .types import IncomingMessage
 from .prompts import ERROR_GENERIC
+from .request_tracker import RequestTracker
 from .utils import mask_phone
+from .watcher import ChatDBWatcher
 from .webhooks import WebhookServer
 
 log = logging.getLogger("bluepopcorn")
@@ -120,6 +122,9 @@ async def run_daemon(settings: Settings) -> None:
     # (System Events keystroke requires Accessibility access)
     await _check_accessibility()
 
+    # Request tracker for targeted notifications
+    request_tracker = RequestTracker(settings.resolve_path(settings.data_dir))
+
     executor = ActionExecutor(
         seerr=seerr,
         llm=llm,
@@ -128,6 +133,7 @@ async def run_daemon(settings: Settings) -> None:
         memory=memory,
         monitor=monitor,
         settings=settings,
+        request_tracker=request_tracker,
     )
 
     # Initialize ROWID cursor (file-based)
@@ -140,14 +146,20 @@ async def run_daemon(settings: Settings) -> None:
         log.info("Resuming from ROWID %d", last_rowid)
 
     # Webhook server for Seerr notifications
-    async def send_to_all(message: str) -> None:
+    async def send_notification(message: str, target_phone: str | None = None) -> None:
         if _is_quiet_hours(settings):
             log.info("Quiet hours — skipping webhook notification: %s", message[:80])
             return
-        for phone in settings.allowed_senders:
-            await sender.send_text(phone, message)
+        if target_phone:
+            if target_phone in settings.allowed_senders:
+                await sender.send_text(target_phone, message)
+            else:
+                log.warning("Skipping notification for stale phone %s", mask_phone(target_phone))
+        else:
+            for phone in settings.allowed_senders:
+                await sender.send_text(phone, message)
 
-    webhook_server = WebhookServer(settings, on_notification=send_to_all)
+    webhook_server = WebhookServer(settings, on_notification=send_notification, request_tracker=request_tracker)
     await webhook_server.start()
 
     # Digest + compression scheduler
@@ -178,6 +190,10 @@ async def run_daemon(settings: Settings) -> None:
         task.add_done_callback(background_tasks.discard)
 
     _track_task(digest_task)
+
+    # kqueue file watcher for faster message detection
+    watcher = ChatDBWatcher(settings.chat_db_path)
+    watcher.start(loop)
 
     log.info("Daemon running. Polling every %.1fs.", settings.poll_interval)
 
@@ -219,10 +235,11 @@ async def run_daemon(settings: Settings) -> None:
                 )
                 _track_task(task)
 
-            await asyncio.sleep(settings.poll_interval)
+            await watcher.wait(settings.poll_interval)
 
     finally:
         log.info("Shutting down...")
+        watcher.stop()
         digest_task.cancel()
         # Cancel and await all background tasks
         for task in list(background_tasks):

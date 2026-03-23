@@ -467,24 +467,37 @@ class SeerrClient:
 
     async def get_detail_extras(
         self, media_type: str, tmdb_id: int
-    ) -> dict[str, str | None]:
-        """Fetch trailer, air date, and download progress from a single detail call.
+    ) -> dict[str, Any]:
+        """Fetch trailer, air date, download progress, collection, and season count.
 
-        Returns {"trailer": ..., "air_date": ..., "download_progress": ...}
-        with None for missing values.
+        Returns dict with None for missing values.
         """
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             data = resp.json()
             media_info = data.get("mediaInfo") or {}
-            return {
+            result: dict[str, Any] = {
                 "trailer": self._extract_trailer(data),
                 "air_date": self._extract_air_date(data, media_type),
                 "download_progress": parse_download_progress(media_info),
+                "collection_id": None,
+                "collection_name": None,
+                "season_count": None,
             }
+            # Extract collection info for movies
+            collection = data.get("collection")
+            if isinstance(collection, dict) and collection.get("id"):
+                result["collection_id"] = collection["id"]
+                result["collection_name"] = collection.get("name")
+            # Extract season count for TV
+            if media_type == "tv":
+                seasons = data.get("seasons", [])
+                result["season_count"] = len([s for s in seasons if s.get("seasonNumber", 0) > 0])
+            return result
         except Exception as e:
             log.debug("Detail extras failed for %s/%d: %s", media_type, tmdb_id, e)
-            return {"trailer": None, "air_date": None, "download_progress": None}
+            return {"trailer": None, "air_date": None, "download_progress": None,
+                    "collection_id": None, "collection_name": None, "season_count": None}
 
     @staticmethod
     def _extract_trailer(data: dict) -> str | None:
@@ -857,6 +870,42 @@ class SeerrClient:
         results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
         log.info("Seerr trending returned %d results", len(results))
         return results
+
+    async def discover_upcoming_movies(self, take: int = 20, exclude_ids: set[int] | None = None) -> list[SearchResult]:
+        """Get upcoming movie releases."""
+        log.info("Seerr discover: upcoming movies")
+        resp = await self._request(
+            "GET", "/api/v1/discover/movies/upcoming",
+            params={"language": "en"},
+        )
+        data = resp.json()
+        results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
+        log.info("Seerr upcoming movies returned %d results", len(results))
+        return results
+
+    async def discover_upcoming_tv(self, take: int = 20, exclude_ids: set[int] | None = None) -> list[SearchResult]:
+        """Get upcoming TV show releases."""
+        log.info("Seerr discover: upcoming TV")
+        resp = await self._request(
+            "GET", "/api/v1/discover/tv/upcoming",
+            params={"language": "en"},
+        )
+        data = resp.json()
+        results = self._parse_results(data.get("results", []), take, filter_lang_year=True, exclude_ids=exclude_ids)
+        log.info("Seerr upcoming TV returned %d results", len(results))
+        return results
+
+    async def get_collection(self, collection_id: int) -> dict | None:
+        """Fetch a movie collection (e.g. The Dark Knight Collection)."""
+        try:
+            resp = await self._request(
+                "GET", f"/api/v1/collection/{collection_id}",
+                params={"language": "en"},
+            )
+            return resp.json()
+        except Exception as e:
+            log.warning("Collection fetch failed for %d: %s", collection_id, e)
+            return None
 
     async def discover_movies(
         self, genre_id: int | None = None, keyword_ids: list[int] | None = None,

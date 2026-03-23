@@ -237,6 +237,70 @@ SCENARIOS: dict[str, list[Turn]] = {
         Turn("add it", expect_action="request",
              alt_action="reply", alt_keywords=["already"]),
     ],
+    # --- New feature scenarios ---
+    "AA": [
+        # Upcoming releases
+        Turn("what movies are coming out soon", expect_action="recommend"),
+        Turn("any upcoming tv shows?", expect_action="recommend", expect_media_type="tv"),
+        Turn("what's coming out this year", expect_action="recommend",
+             alt_action="search"),
+    ],
+    "AB": [
+        # Season selection — multi-season show
+        Turn("add breaking bad", expect_action="search"),
+        Turn("just season 1", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AC": [
+        # Season selection — latest season
+        Turn("add the latest season of grey's anatomy", expect_action="search"),
+        Turn("yeah the newest one", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AD": [
+        # Season selection — all seasons (LLM may skip search and request directly)
+        Turn("add all of friends", expect_action="search",
+             alt_action="request"),
+        Turn("all seasons", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AE": [
+        # Collections — search shows collection info, then request whole collection
+        Turn("search for the dark knight", expect_action="search"),
+        Turn("add the whole collection", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AF": [
+        # Collections — single movie from a collection (should NOT batch)
+        Turn("add the dark knight rises", expect_action="search"),
+        Turn("yeah just that one", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AG": [
+        # Upcoming + genre filter
+        Turn("any upcoming horror movies", expect_action="recommend", expect_media_type="movie"),
+        Turn("what about upcoming sci-fi shows", expect_action="recommend", expect_media_type="tv"),
+    ],
+    "AH": [
+        # Mixed flow: upcoming → search → request
+        Turn("what's coming out soon", expect_action="recommend"),
+        Turn("tell me more about the first one", expect_action="search",
+             alt_action="reply"),
+        Turn("add it", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AI": [
+        # Edge case: asking about seasons for a movie (should ignore)
+        Turn("add inception season 2", expect_action="search"),
+        Turn("add it", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
+    "AJ": [
+        # Edge case: collection that's already fully available
+        Turn("search for toy story", expect_action="search"),
+        Turn("add the whole collection", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
+    ],
 }
 
 

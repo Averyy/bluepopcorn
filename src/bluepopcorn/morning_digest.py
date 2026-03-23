@@ -4,7 +4,9 @@ import asyncio
 import logging
 
 from .config import Settings
+from .prompts import DIGEST_SUGGESTION
 from .seerr import SeerrClient
+from .types import MediaStatus
 
 log = logging.getLogger(__name__)
 
@@ -26,9 +28,10 @@ class MorningDigest:
     async def _get_media_status(self) -> str | None:
         """Get media status from Seerr."""
         try:
-            available_result, pending_result = await asyncio.gather(
+            available_result, pending_result, suggestion = await asyncio.gather(
                 self._fetch_available(),
                 self._fetch_pending(),
+                self._fetch_suggestion(),
             )
 
             parts: list[str] = []
@@ -37,7 +40,15 @@ class MorningDigest:
             if pending_result:
                 parts.append(pending_result)
 
-            return ". ".join(parts) + "." if parts else None
+            result = ". ".join(parts) + "." if parts else None
+
+            if suggestion:
+                if result:
+                    result += f"\n\n{suggestion}"
+                else:
+                    result = suggestion
+
+            return result
 
         except Exception as e:
             log.error("Media status fetch failed: %s", e)
@@ -65,3 +76,19 @@ class MorningDigest:
             log.debug("Failed to fetch pending requests: %s", e)
         return None
 
+    async def _fetch_suggestion(self) -> str | None:
+        """Suggest a trending title not yet in the library."""
+        try:
+            trending = await self.seerr.discover_trending(take=10)
+            for item in trending:
+                if item.status in (MediaStatus.NOT_TRACKED, MediaStatus.UNKNOWN):
+                    if item.rating and item.rating >= 7.0 and item.overview:
+                        overview = item.overview[:120] + "..." if len(item.overview) > 120 else item.overview
+                        year_str = f" ({item.year})" if item.year else ""
+                        return DIGEST_SUGGESTION.format(
+                            title=item.title, year_str=year_str,
+                            overview=overview, rating=item.rating,
+                        )
+        except Exception as e:
+            log.debug("Failed to fetch suggestion: %s", e)
+        return None
