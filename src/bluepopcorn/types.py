@@ -9,8 +9,6 @@ class Action(str, enum.Enum):
     REQUEST = "request"
     RECENT = "recent"
     RECOMMEND = "recommend"
-    REMEMBER = "remember"
-    FORGET = "forget"
     REPLY = "reply"
 
 
@@ -40,7 +38,6 @@ class LLMDecision:
     query: str | None = None
     tmdb_id: int | None = None
     media_type: str | None = None  # "movie" or "tv"
-    fact: str | None = None  # for remember/forget actions
     # Structured recommend fields (LLM specifies these instead of dumping into query)
     genre: str | None = None  # genre name, e.g. "sci-fi", "comedy"
     keyword: str | None = None  # thematic keyword, e.g. "robots", "time travel"
@@ -60,7 +57,6 @@ class LLMDecision:
             query=data.get("query"),
             tmdb_id=data.get("tmdb_id"),
             media_type=data.get("media_type"),
-            fact=data.get("fact"),
             genre=data.get("genre"),
             keyword=data.get("keyword"),
             year=data.get("year"),
@@ -98,23 +94,6 @@ class SearchResult:
     next_air_date: str | None = None  # e.g. "S2E5 airs 2026-03-20" or "2026-07-04"
     from_person: bool = False  # True if result came from person search (actor/director credits)
 
-    @property
-    def status_label(self) -> str:
-        labels = {
-            MediaStatus.AVAILABLE: "available in library",
-            MediaStatus.PARTIALLY_AVAILABLE: "partially available in library",
-            MediaStatus.PROCESSING: "requested: waiting for release",
-            MediaStatus.PENDING: "requested: waiting for admin approval",
-            MediaStatus.UNKNOWN: "not in the library",
-            MediaStatus.NOT_TRACKED: "not in the library",
-            MediaStatus.BLOCKLISTED: "blocked/unable to download",
-            MediaStatus.DELETED: "not in the library",
-        }
-        label = labels.get(self.status, "not in the library")
-        if self.status == MediaStatus.PROCESSING and self.download_progress:
-            label = f"currently downloading ({self.download_progress})"
-        return label
-
 
 @dataclass
 class HistoryEntry:
@@ -123,48 +102,25 @@ class HistoryEntry:
     timestamp: float
 
 
-# JSON schema for claude -p --json-schema
-LLM_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {
-            "type": "string",
-            "enum": [
-                "search", "request",
-                "recent", "recommend", "remember", "forget", "reply",
-            ],
-        },
-        "query": {"type": "string"},
-        "tmdb_id": {"type": "integer"},
-        "media_type": {"type": "string", "enum": ["movie", "tv"]},
-        "message": {"type": "string"},
-        "fact": {"type": "string"},
-        "genre": {"type": "string"},
-        "keyword": {"type": "string"},
-        "year": {"type": "integer"},
-        "year_end": {"type": "integer"},
-        "similar_to": {"type": "string"},
-        "trending": {"type": "boolean"},
-        "count": {"type": "integer"},
-        "page": {"type": "integer"},
-    },
-    "required": ["action", "message"],
-    "additionalProperties": False,
+# ── Status labels (domain mapping: enum → human-readable for LLM context) ─
+
+STATUS_LABELS: dict[MediaStatus, str] = {
+    MediaStatus.AVAILABLE: "available in library",
+    MediaStatus.PARTIALLY_AVAILABLE: "partially available in library",
+    MediaStatus.PROCESSING: "requested: waiting for release",
+    MediaStatus.PENDING: "requested: waiting for admin approval",
+    MediaStatus.UNKNOWN: "not in the library",
+    MediaStatus.NOT_TRACKED: "not in the library",
+    MediaStatus.BLOCKLISTED: "blocked/unable to download",
+    MediaStatus.DELETED: "not in the library",
 }
 
-# Restricted schema for _llm_respond — only reply or request (follow-up "add it")
-LLM_RESPOND_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {
-            "type": "string",
-            "enum": ["reply", "request"],
-        },
-        "tmdb_id": {"type": "integer"},
-        "media_type": {"type": "string", "enum": ["movie", "tv"]},
-        "message": {"type": "string"},
-        "multiple_results": {"type": "boolean"},
-    },
-    "required": ["action", "message"],
-    "additionalProperties": False,
-}
+
+def status_label_for(
+    status: MediaStatus, download_progress: str | None = None
+) -> str:
+    """Human-readable status label, with download progress override."""
+    label = STATUS_LABELS.get(status, "not in the library")
+    if status == MediaStatus.PROCESSING and download_progress:
+        label = f"currently downloading ({download_progress})"
+    return label

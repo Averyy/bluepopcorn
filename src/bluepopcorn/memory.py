@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from .config import Settings
+from .utils import mask_phone
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class UserMemory:
 
         sections["Profile"] = profile_lines
         self._atomic_write(self._path(sender), self._rebuild(sections))
-        log.info("Set %s=%s for %s", key, value, sender)
+        log.info("Set %s=%s for %s", key, value, mask_phone(sender))
 
     def get_preferences(self, sender: str) -> list[str]:
         """Return # Preferences entries (without the '- ' prefix)."""
@@ -178,31 +179,14 @@ class UserMemory:
             if line.startswith("- "):
                 existing_lower = line[2:].lower()
                 if fact_lower in existing_lower or existing_lower in fact_lower:
-                    log.debug("Duplicate preference skipped for %s: %s", sender, fact[:60])
+                    log.debug("Duplicate preference skipped for %s: %s", mask_phone(sender), fact[:60])
                     return False
 
         prefs.append(f"- {fact}")
         sections["Preferences"] = prefs
         self._atomic_write(self._path(sender), self._rebuild(sections))
-        log.info("Added preference for %s: %s", sender, fact[:80])
+        log.info("Added preference for %s: %s", mask_phone(sender), fact[:80])
         return True
-
-    def remove_preference(self, sender: str, keyword: str) -> bool:
-        """Remove first matching line from # Preferences. Returns True if removed."""
-        content = self.load(sender)
-        if not content:
-            return False
-        sections = self.parse_sections(content)
-        prefs = sections.get("Preferences", [])
-        keyword_lower = keyword.lower()
-        for i, line in enumerate(prefs):
-            if line.startswith("- ") and keyword_lower in line[2:].lower():
-                removed = prefs.pop(i)
-                sections["Preferences"] = prefs
-                self._atomic_write(self._path(sender), self._rebuild(sections))
-                log.info("Removed preference for %s: %s", sender, removed[:80])
-                return True
-        return False
 
     def parse_tastes(self, sections: dict[str, list[str]]) -> dict[str, list[str]]:
         """Extract tastes from parsed sections dict."""
@@ -291,7 +275,7 @@ class UserMemory:
         all_items = [genres, movies, shows, avoid_genres, avoid]
         added = sum(len(x) for x in all_items if x)
         if added:
-            log.info("Updated tastes for %s (+%d items)", sender, added)
+            log.info("Updated tastes for %s (+%d items)", mask_phone(sender), added)
 
     def append_summary(
         self, sender: str, date: str, summary: str, tier: str = "Recent"
@@ -319,6 +303,109 @@ class UserMemory:
         sections = self.parse_sections(content)
         sections[section] = lines
         self._atomic_write(self._path(sender), self._rebuild(sections))
+
+    def save(self, sender: str, sections: dict[str, list[str]]) -> None:
+        """Write sections dict to the memory file."""
+        self._atomic_write(self._path(sender), self._rebuild(sections))
+
+    # ── In-place section manipulation (no I/O, for batch operations) ──
+
+    def append_summary_to(
+        self, sections: dict[str, list[str]], date: str, summary: str, tier: str = "Recent"
+    ) -> None:
+        """Append a dated summary to a sections dict (no I/O)."""
+        summary = _sanitize_for_memory(summary)
+        sections.setdefault(tier, []).append(f"- {date}: {summary}")
+
+    def update_tastes_in(
+        self,
+        sections: dict[str, list[str]],
+        *,
+        genres: list[str] | None = None,
+        movies: list[str] | None = None,
+        shows: list[str] | None = None,
+        avoid_genres: list[str] | None = None,
+        avoid: list[str] | None = None,
+    ) -> int:
+        """Merge new taste items into sections dict (no I/O). Returns count added."""
+        genres = [_sanitize_for_memory(g) for g in genres] if genres else genres
+        movies = [_sanitize_for_memory(m) for m in movies] if movies else movies
+        shows = [_sanitize_for_memory(s) for s in shows] if shows else shows
+        avoid_genres = [_sanitize_for_memory(g) for g in avoid_genres] if avoid_genres else avoid_genres
+        avoid = [_sanitize_for_memory(a) for a in avoid] if avoid else avoid
+
+        existing = self.parse_tastes(sections)
+
+        def _merge(key: str, new_items: list[str] | None) -> str | None:
+            if not new_items:
+                return None
+            old = existing.get(key, [])
+            old_lower = {item.lower() for item in old}
+            merged = list(old)
+            for item in new_items:
+                if item.strip() and item.strip().lower() not in old_lower:
+                    merged.append(item.strip())
+                    old_lower.add(item.strip().lower())
+            return ", ".join(merged) if merged else None
+
+        likes_lines: list[str] = []
+        for key, label, items in [
+            ("genres", "Genres", genres),
+            ("movies", "Movies", movies),
+            ("shows", "Shows", shows),
+        ]:
+            result = _merge(key, items)
+            if result:
+                likes_lines.append(f"{label}: {result}")
+            elif key in existing:
+                likes_lines.append(f"{label}: {', '.join(existing[key])}")
+
+        dislikes_lines: list[str] = []
+        for key, label, items in [
+            ("avoid genres", "Genres", avoid_genres),
+            ("avoid titles", "Titles", avoid),
+        ]:
+            result = _merge(key, items)
+            if result:
+                dislikes_lines.append(f"{label}: {result}")
+            elif key in existing:
+                dislikes_lines.append(f"{label}: {', '.join(existing[key])}")
+
+        sections["Likes"] = likes_lines
+        sections["Dislikes"] = dislikes_lines
+        all_items = [genres, movies, shows, avoid_genres, avoid]
+        return sum(len(x) for x in all_items if x)
+
+    def add_preference_to(
+        self, sections: dict[str, list[str]], fact: str
+    ) -> bool:
+        """Add preference to sections dict (no I/O). Returns True if added."""
+        fact = _sanitize_for_memory(fact)
+
+        name_match = _NAME_RE.match(fact)
+        if name_match:
+            name = name_match.group(1).strip().rstrip(".")
+            profile_lines = sections.setdefault("Profile", [])
+            target = "name:"
+            found = False
+            for i, line in enumerate(profile_lines):
+                if line.strip().lower().startswith(target):
+                    profile_lines[i] = f"Name: {name}"
+                    found = True
+                    break
+            if not found:
+                profile_lines.append(f"Name: {name}")
+            return True
+
+        prefs = sections.setdefault("Preferences", [])
+        fact_lower = fact.lower()
+        for line in prefs:
+            if line.startswith("- "):
+                existing_lower = line[2:].lower()
+                if fact_lower in existing_lower or existing_lower in fact_lower:
+                    return False
+        prefs.append(f"- {fact}")
+        return True
 
     def truncate_if_needed(self, sender: str, max_lines: int = 200) -> None:
         """Trim oldest entries from History, then Weekly, then Recent."""
@@ -353,4 +440,4 @@ class UserMemory:
             sections[tier] = tier_lines
 
         self._atomic_write(path, self._rebuild(sections))
-        log.info("Truncated memory for %s to ≤%d lines", sender, max_lines)
+        log.info("Truncated memory for %s to ≤%d lines", mask_phone(sender), max_lines)

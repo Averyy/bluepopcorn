@@ -18,51 +18,12 @@ from .config import Settings
 from .llm import LLMClient
 from .memory import UserMemory
 from .monitor import MessageMonitor
+from .prompts import COMPRESS_DAILY_PROMPT, COMPRESS_MONTHLY_PROMPT, COMPRESS_WEEKLY_PROMPT
+from .utils import mask_phone
+from .schemas import COMPRESSION_SCHEMA, ROLLUP_SCHEMA
 from .types import HistoryEntry
 
 log = logging.getLogger(__name__)
-
-COMPRESSION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {
-            "type": "string",
-            "description": "1-3 sentence summary. Always include specific title names and outcomes.",
-        },
-        "suggested_preferences": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Genuine repeated patterns to add as preferences (empty if none)",
-        },
-        "genres": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Genres the user showed interest in (e.g. 'horror', 'sci-fi', 'Korean drama')",
-        },
-        "avoid_genres": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Genres the user said they dislike or want to avoid, with reason in brackets if known (e.g. 'reality TV [finds it trashy]', 'romance')",
-        },
-        "liked_movies": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Movies the user requested or expressed interest in, with year (e.g. 'Sinners (2025)')",
-        },
-        "liked_shows": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "TV shows the user requested or expressed interest in, with year (e.g. 'Severance (2022)')",
-        },
-        "avoid_titles": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Titles the user rejected, disliked, or said to avoid, with year and reason in brackets if known (e.g. 'The Monkey (2025) [too campy]', 'Love Is Blind (2020) [hates reality TV]')",
-        },
-    },
-    "required": ["summary", "suggested_preferences", "genres", "avoid_genres", "liked_movies", "liked_shows", "avoid_titles"],
-    "additionalProperties": False,
-}
 
 
 class Compressor:
@@ -114,6 +75,14 @@ class Compressor:
         if not messages:
             return
 
+        # Filter out morning digest messages — they're bot-generated noise
+        messages = [
+            m for m in messages
+            if not (m.role == "assistant" and m.content.startswith("Good morning."))
+        ]
+        if not messages:
+            return
+
         # Build conversation text for the LLM
         lines: list[str] = []
         for m in messages:
@@ -141,31 +110,22 @@ class Compressor:
         recent = sections.get("Recent", [])
         recent_text = "\n".join(ln for ln in recent if ln.startswith("- "))[:500] or "(none)"
 
-        prompt = (
-            "Summarize this day's iMessage conversation between a user and a media bot.\n\n"
-            "Rules:\n"
-            "- Always mention specific title names and outcomes (e.g. 'Requested Severance S3, added successfully')\n"
-            "- Keep it to 1-3 sentences. Skip conversation mechanics ('user asked', 'bot responded').\n"
-            "- Extract genres the user showed interest in for the genres array.\n"
-            "- Extract genres the user said they dislike or want to avoid for avoid_genres. Include reason in [brackets] if stated.\n"
-            "- Extract specific movies/shows the user requested or asked about for liked_movies/liked_shows. Include year.\n"
-            "- Extract titles the user rejected or disliked for avoid_titles. Include reason in [brackets] if stated.\n"
-            "- Only suggest preferences for genuine repeated patterns, not one-off requests.\n\n"
-            f"Already known preferences (do NOT re-suggest):\n{prefs_text}\n\n"
-            f"Already known tastes (do NOT re-add):\n{tastes_text}\n\n"
-            f"Recent summaries (for context, don't repeat):\n{recent_text}\n\n"
-            f"Conversation:\n{conversation}"
+        prompt = COMPRESS_DAILY_PROMPT.format(
+            prefs_text=prefs_text,
+            tastes_text=tastes_text,
+            recent_text=recent_text,
+            conversation=conversation,
         )
 
         try:
             result = await self.llm.summarize(prompt, COMPRESSION_SCHEMA)
         except Exception as e:
-            log.error("Daily compression LLM call failed for %s: %s", sender, e)
+            log.error("Daily compression LLM call failed for %s: %s", mask_phone(sender), e)
             return
 
         summary = result.get("summary", "").strip()
         if not summary:
-            log.warning("Empty summary from compression for %s", sender)
+            log.warning("Empty summary from compression for %s", mask_phone(sender))
             return
 
         # Determine the date from the first message (use configured timezone)
@@ -173,10 +133,13 @@ class Compressor:
         first_ts = messages[0].timestamp
         date_str = datetime.datetime.fromtimestamp(first_ts, tz=tz).strftime("%Y-%m-%d")
 
-        # Hold the memory lock for all writes to prevent race with user remember/forget
+        # Hold the memory lock for all writes — single load/write cycle
         async with self.memory.get_lock(sender):
-            self.memory.append_summary(sender, date_str, summary, tier="Recent")
-            log.info("Daily compression for %s on %s: %s", sender, date_str, summary[:100])
+            content = self.memory.load_or_create(sender)
+            sections = self.memory.parse_sections(content)
+
+            self.memory.append_summary_to(sections, date_str, summary, tier="Recent")
+            log.info("Daily compression for %s on %s: %s", mask_phone(sender), date_str, summary[:100])
 
             # Update tastes (persistent, never compressed)
             genres = result.get("genres", [])
@@ -185,10 +148,12 @@ class Compressor:
             shows = result.get("liked_shows", [])
             avoid = result.get("avoid_titles", [])
             if genres or movies or shows or avoid_genres or avoid:
-                self.memory.update_tastes(
-                    sender, genres=genres, movies=movies, shows=shows,
+                added = self.memory.update_tastes_in(
+                    sections, genres=genres, movies=movies, shows=shows,
                     avoid_genres=avoid_genres, avoid=avoid,
                 )
+                if added:
+                    log.info("Updated tastes for %s (+%d items)", mask_phone(sender), added)
 
             # Auto-append suggested preferences
             suggested = result.get("suggested_preferences", [])
@@ -196,8 +161,10 @@ class Compressor:
                 pref = pref.strip()
                 if pref:
                     tagged = f"{pref} (auto {date_str})"
-                    self.memory.add_preference(sender, tagged)
-                    log.info("Auto-preference for %s: %s", sender, tagged)
+                    if self.memory.add_preference_to(sections, tagged):
+                        log.info("Auto-preference for %s: %s", mask_phone(sender), tagged)
+
+            self.memory.save(sender, sections)
 
     async def compress_weekly(self, sender: str) -> None:
         """Roll up daily entries older than 7 days into # Weekly."""
@@ -232,22 +199,12 @@ class Compressor:
 
         # Summarize old entries into a weekly summary
         text = "\n".join(old_entries)
-        prompt = (
-            "Combine these daily conversation summaries into one weekly summary. "
-            "1-2 sentences. Preserve specific title names. "
-            "Focus on patterns and key events.\n\n"
-            f"Daily summaries:\n{text}"
-        )
+        prompt = COMPRESS_WEEKLY_PROMPT.format(text=text)
 
         try:
-            result = await self.llm.summarize(prompt, {
-                "type": "object",
-                "properties": {"summary": {"type": "string"}},
-                "required": ["summary"],
-                "additionalProperties": False,
-            })
+            result = await self.llm.summarize(prompt, ROLLUP_SCHEMA)
         except Exception as e:
-            log.error("Weekly compression failed for %s: %s", sender, e)
+            log.error("Weekly compression failed for %s: %s", mask_phone(sender), e)
             return
 
         summary = result.get("summary", "").strip()
@@ -262,7 +219,7 @@ class Compressor:
         async with self.memory.get_lock(sender):
             self.memory.append_summary(sender, week_label, summary, tier="Weekly")
             self.memory.replace_section(sender, "Recent", keep_lines)
-        log.info("Weekly compression for %s: %s", sender, summary[:100])
+        log.info("Weekly compression for %s: %s", mask_phone(sender), summary[:100])
 
     async def compress_monthly(self, sender: str) -> None:
         """Roll up weekly entries older than 4 weeks into # History."""
@@ -296,22 +253,12 @@ class Compressor:
             return
 
         text = "\n".join(old_entries)
-        prompt = (
-            "Combine these weekly conversation summaries into one monthly summary. "
-            "1-2 sentences. Preserve specific title names where notable. "
-            "Focus on big-picture patterns and key events.\n\n"
-            f"Weekly summaries:\n{text}"
-        )
+        prompt = COMPRESS_MONTHLY_PROMPT.format(text=text)
 
         try:
-            result = await self.llm.summarize(prompt, {
-                "type": "object",
-                "properties": {"summary": {"type": "string"}},
-                "required": ["summary"],
-                "additionalProperties": False,
-            })
+            result = await self.llm.summarize(prompt, ROLLUP_SCHEMA)
         except Exception as e:
-            log.error("Monthly compression failed for %s: %s", sender, e)
+            log.error("Monthly compression failed for %s: %s", mask_phone(sender), e)
             return
 
         summary = result.get("summary", "").strip()
@@ -332,7 +279,7 @@ class Compressor:
             self.memory.append_summary(sender, month_label, summary, tier="History")
             self.memory.replace_section(sender, "Weekly", keep_lines)
             self.memory.truncate_if_needed(sender)
-        log.info("Monthly compression for %s: %s", sender, summary[:100])
+        log.info("Monthly compression for %s: %s", mask_phone(sender), summary[:100])
 
     async def run_compression(self, sender: str) -> None:
         """Run all compression tiers for a sender, catching up missed days."""
@@ -342,7 +289,7 @@ class Compressor:
         last_compressed = self._read_last_compressed(sender)
 
         if last_compressed and last_compressed >= yesterday:
-            log.debug("Compression already done for %s through %s", sender, last_compressed)
+            log.debug("Compression already done for %s through %s", mask_phone(sender), last_compressed)
             return
 
         # Determine which days need compression
@@ -355,11 +302,11 @@ class Compressor:
                 messages = await self.monitor.get_messages_for_date(sender, current, tz=tz)
                 if messages:
                     await self.compress_daily(sender, messages)
-                    log.info("Compressed %s for %s (%d messages)", current, sender, len(messages))
+                    log.info("Compressed %s for %s (%d messages)", current, mask_phone(sender), len(messages))
                 else:
-                    log.debug("No messages for %s on %s, skipping", sender, current)
+                    log.debug("No messages for %s on %s, skipping", mask_phone(sender), current)
             except Exception as e:
-                log.error("Daily compression failed for %s on %s: %s", sender, current, e)
+                log.error("Daily compression failed for %s on %s: %s", mask_phone(sender), current, e)
                 return  # Don't update last_compressed — next run will retry
             current += datetime.timedelta(days=1)
 
@@ -369,9 +316,9 @@ class Compressor:
         try:
             await self.compress_weekly(sender)
         except Exception as e:
-            log.error("Weekly compression failed for %s: %s", sender, e)
+            log.error("Weekly compression failed for %s: %s", mask_phone(sender), e)
 
         try:
             await self.compress_monthly(sender)
         except Exception as e:
-            log.error("Monthly compression failed for %s: %s", sender, e)
+            log.error("Monthly compression failed for %s: %s", mask_phone(sender), e)

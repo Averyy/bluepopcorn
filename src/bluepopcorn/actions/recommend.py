@@ -8,15 +8,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from . import ActionExecutor
 
+from ..prompts import (
+    CONTEXT_RECOMMEND_EMPTY,
+    CONTEXT_RECOMMEND_NO_CRITERIA,
+    CONTEXT_SIMILAR_EMPTY,
+    CONTEXT_SIMILAR_HEADER,
+    CONTEXT_SIMILAR_NOT_FOUND,
+    ERROR_GENERIC,
+)
 from ..seerr import SeerrError
 from ..types import LLMDecision, SearchResult
-from ._base import (
-    ERROR_GENERIC,
-    format_recommendations,
-    format_search_results,
-)
+from ._base import format_search_results
 
 log = logging.getLogger(__name__)
+
+_TMDB_RE = re.compile(r"tmdb:(\d+)")
 
 
 async def handle_recommend(
@@ -28,7 +34,7 @@ async def handle_recommend(
     # Collect tmdb_ids already shown in this session to avoid repeats
     shown_ids: set[int] = set()
     for _ts, ctx_text in executor.get_context_entries(sender_phone):
-        for m in re.finditer(r"tmdb:(\d+)", ctx_text):
+        for m in _TMDB_RE.finditer(ctx_text):
             shown_ids.add(int(m.group(1)))
 
     # "Similar to X" — LLM specifies the title directly
@@ -131,8 +137,8 @@ async def handle_recommend(
         coros["search"] = executor.seerr.search(search_query, media_type=want_type)
 
     if not coros:
-        executor._add_context(sender_phone, "[Recommendations: no search criteria provided]")
-        return (await executor._llm_respond(sender_phone, fallback="Couldn't find any recommendations for that.", intent="recommend"))[0]
+        executor._add_context(sender_phone, CONTEXT_RECOMMEND_NO_CRITERIA)
+        return (await executor._llm_respond(sender_phone, scenario="recommend_no_criteria"))[0]
 
     try:
         keys = list(coros.keys())
@@ -160,8 +166,8 @@ async def handle_recommend(
             combined = typed
 
     if not combined:
-        executor._add_context(sender_phone, f'[Recommendations for "{label}": no results found]')
-        return (await executor._llm_respond(sender_phone, fallback="Couldn't find any recommendations for that.", intent="recommend"))[0]
+        executor._add_context(sender_phone, CONTEXT_RECOMMEND_EMPTY.format(label=label))
+        return (await executor._llm_respond(sender_phone, scenario="recommend_empty"))[0]
 
     results = combined[:take]
 
@@ -186,9 +192,7 @@ async def handle_recommend(
         }
 
     return await executor._send_with_poster(
-        sender_phone, display_results,
-        fallback=format_recommendations(display_results),
-        intent="recommend",
+        sender_phone, display_results, scenario="recommend_results",
     )
 
 
@@ -214,8 +218,8 @@ async def _handle_similar(
         search_results = []
 
     if not search_results:
-        executor._add_context(sender_phone, f"[Similar to \"{title}\": couldn't find the base title]")
-        return (await executor._llm_respond(sender_phone, fallback=f"Couldn't find \"{title}\" to base recommendations on.", intent="recommend"))[0]
+        executor._add_context(sender_phone, CONTEXT_SIMILAR_NOT_FOUND.format(title=title))
+        return (await executor._llm_respond(sender_phone, scenario="similar_not_found"))[0]
 
     base = search_results[0]
     try:
@@ -231,8 +235,8 @@ async def _handle_similar(
         results = []
 
     if not results:
-        executor._add_context(sender_phone, f"[Similar to \"{base.title}\": no recommendations found]")
-        return (await executor._llm_respond(sender_phone, fallback=f"Couldn't find recommendations similar to {base.title}.", intent="recommend"))[0]
+        executor._add_context(sender_phone, CONTEXT_SIMILAR_EMPTY.format(title=base.title))
+        return (await executor._llm_respond(sender_phone, scenario="similar_empty"))[0]
 
     results = results[:7]
     await executor._enrich_results(results)
@@ -242,12 +246,10 @@ async def _handle_similar(
     display_results = with_posters if with_posters else results
 
     # Store context
-    executor._add_context(sender_phone, f"[Recommendations similar to {base.title}]")
+    executor._add_context(sender_phone, CONTEXT_SIMILAR_HEADER.format(title=base.title))
     context = format_search_results(display_results, query=f"similar to {base.title}")
     executor._add_context(sender_phone, context)
 
     return await executor._send_with_poster(
-        sender_phone, display_results,
-        fallback=format_recommendations(display_results, similar_to=base.title),
-        intent="recommend",
+        sender_phone, display_results, scenario="similar_results",
     )

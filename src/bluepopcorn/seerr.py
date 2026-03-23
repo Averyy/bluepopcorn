@@ -646,7 +646,7 @@ class SeerrClient:
                 "year": detail["year"],
                 "media_type": media_type,
                 "overview": detail["overview"],
-                "status": status.name.lower(),
+                "status": status,
                 "tmdb_id": tmdb_id,
                 "added_at": item.get("mediaAddedAt") or item.get("createdAt", ""),
             }
@@ -666,7 +666,7 @@ class SeerrClient:
                 "year": detail["year"],
                 "media_type": media_type,
                 "overview": detail["overview"],
-                "status": status.name.lower(),
+                "status": status,
                 "tmdb_id": tmdb_id,
                 "requested_at": req.get("createdAt", ""),
             }

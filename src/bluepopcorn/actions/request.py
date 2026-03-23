@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from . import ActionExecutor
 
+from ..prompts import CONTEXT_DEDUP, ERROR_GENERIC
 from ..seerr import SeerrClient, seerr_title
-from ..types import LLMDecision, MediaStatus
-from ._base import ERROR_GENERIC, format_search_results
+from ..types import LLMDecision, MediaStatus, STATUS_LABELS
+from ._base import format_search_results
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ async def handle_request(
                     }
             except Exception as e:
                 log.debug("Fallback search for request failed: %s", e)
-        return (await executor._llm_respond(sender_phone, intent="search"))[0]
+        return (await executor._llm_respond(sender_phone, scenario="search_results"))[0]
 
     # Check if already requested/available before making a duplicate request
     title = "this"
@@ -46,7 +47,10 @@ async def handle_request(
     try:
         detail = await executor.seerr.get_media_status(decision.media_type, decision.tmdb_id)
         if detail:
-            title = seerr_title(detail, default="this")
+            raw_title = seerr_title(detail, default="this")
+            year_raw = detail.get("releaseDate") or detail.get("firstAirDate") or ""
+            year = year_raw[:4] if len(year_raw) >= 4 else ""
+            title = f"{raw_title} ({year})" if year else raw_title
             # Pre-extract season numbers for TV to avoid a redundant detail call
             if decision.media_type == "tv":
                 seasons = SeerrClient.extract_season_numbers(detail)
@@ -58,15 +62,11 @@ async def handle_request(
                 except ValueError:
                     status = MediaStatus.UNKNOWN
 
-                dedup_context = {
-                    MediaStatus.AVAILABLE: f'[Request check: "{title}" is already available in library]',
-                    MediaStatus.PROCESSING: f'[Request check: "{title}" is already downloading]',
-                    MediaStatus.PENDING: f'[Request check: "{title}" is already requested, waiting on approval]',
-                }.get(status)
-                if dedup_context:
+                if status in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE, MediaStatus.PROCESSING, MediaStatus.PENDING):
+                    dedup_context = CONTEXT_DEDUP.format(title=title, status=STATUS_LABELS[status])
                     await executor._store_request_context(sender_phone, title, decision)
                     executor._add_context(sender_phone, dedup_context)
-                    return (await executor._llm_respond(sender_phone, fallback=f"{title} is already on the server.", intent="dedup"))[0]
+                    return (await executor._llm_respond(sender_phone, scenario="dedup"))[0]
     except Exception as e:
         log.debug("Pre-request status check failed (proceeding anyway): %s", e)
 

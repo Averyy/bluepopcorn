@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from .config import Settings
+from .utils import mask_phone
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ end tell
         timeout = 15 + len(image_paths)
         ok, err = await self._run_applescript(script, timeout=timeout)
         if ok:
-            log.info("Sent %d images as gallery to %s", len(image_paths), phone)
+            log.info("Sent %d images as gallery to %s", len(image_paths), mask_phone(phone))
             return True
         log.warning("Gallery send failed: %s", err)
         return False
@@ -275,7 +276,7 @@ end tell
 '''
         ok, err = await self._run_applescript(script)
         if ok:
-            log.debug("Typing indicator started for %s", phone)
+            log.debug("Typing indicator started for %s", mask_phone(phone))
 
     async def stop_typing(self) -> None:
         """Clear the compose field to stop typing indicator.
@@ -354,7 +355,7 @@ end tell
                 for attempt in range(retries):
                     success, error = await self._send_text_once(phone, chunk)
                     if success:
-                        log.info("Sent message to %s (chunk %d/%d)", phone, i + 1, len(chunks))
+                        log.info("Sent message to %s (chunk %d/%d)", mask_phone(phone), i + 1, len(chunks))
                         sent = True
                         break
                     backoff = 2 ** attempt
@@ -369,10 +370,10 @@ end tell
                     if await self._restart_messages():
                         success, error = await self._send_text_once(phone, chunk)
                         if success:
-                            log.info("Sent message to %s after restart (chunk %d/%d)", phone, i + 1, len(chunks))
+                            log.info("Sent message to %s after restart (chunk %d/%d)", mask_phone(phone), i + 1, len(chunks))
                             sent = True
                     if not sent:
-                        log.error("Failed to send message to %s after %d retries + restart", phone, retries)
+                        log.error("Failed to send message to %s after %d retries + restart", mask_phone(phone), retries)
                         return False
                 # Delay between chunks to maintain order
                 if i < len(chunks) - 1:
@@ -400,7 +401,7 @@ end tell
                 script = self._build_send_image_script(phone, image_path)
                 success, error = await self._run_applescript(script)
                 if success:
-                    log.info("Sent image to %s: %s", phone, image_path)
+                    log.info("Sent image to %s: %s", mask_phone(phone), image_path)
                     return True
                 backoff = 2 ** attempt
                 log.warning(
@@ -414,9 +415,9 @@ end tell
                 script = self._build_send_image_script(phone, image_path)
                 success, error = await self._run_applescript(script)
                 if success:
-                    log.info("Sent image to %s after restart: %s", phone, image_path)
+                    log.info("Sent image to %s after restart: %s", mask_phone(phone), image_path)
                     return True
-            log.error("Failed to send image to %s after %d retries + restart", phone, retries)
+            log.error("Failed to send image to %s after %d retries + restart", mask_phone(phone), retries)
             return False
 
     async def send_images(self, phone: str, image_paths: list[str], retries: int = 3) -> bool:
@@ -452,7 +453,7 @@ end tell
                     script = self._build_send_image_script(phone, image_path)
                     success, error = await self._run_applescript(script)
                     if success:
-                        log.info("Sent image %d/%d to %s", i + 1, len(image_paths), phone)
+                        log.info("Sent image %d/%d to %s", i + 1, len(image_paths), mask_phone(phone))
                         sent = True
                         break
                     backoff = 2 ** attempt
@@ -467,10 +468,10 @@ end tell
                         script = self._build_send_image_script(phone, image_path)
                         success, error = await self._run_applescript(script)
                         if success:
-                            log.info("Sent image %d/%d to %s after restart", i + 1, len(image_paths), phone)
+                            log.info("Sent image %d/%d to %s after restart", i + 1, len(image_paths), mask_phone(phone))
                             sent = True
                     if not sent:
-                        log.error("Failed to send image %d/%d to %s after %d retries + restart", i + 1, len(image_paths), phone, retries)
+                        log.error("Failed to send image %d/%d to %s after %d retries + restart", i + 1, len(image_paths), mask_phone(phone), retries)
                         return False
                 # 1s delay between images for iOS stacking
                 if i < len(image_paths) - 1:

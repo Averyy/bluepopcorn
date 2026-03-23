@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .actions import ActionExecutor, ERROR_GENERIC
+from .actions import ActionExecutor
 from .cli import cli_mode
 from .compression import Compressor
 from .config import Settings, load_settings
@@ -22,6 +22,8 @@ from .posters import PosterHandler
 from .seerr import SeerrClient
 from .sender import MessageSender
 from .types import IncomingMessage
+from .prompts import ERROR_GENERIC
+from .utils import mask_phone
 from .webhooks import WebhookServer
 
 log = logging.getLogger("bluepopcorn")
@@ -207,8 +209,8 @@ async def run_daemon(settings: Settings) -> None:
                 latest_by_sender[msg.sender] = msg
 
             for msg in latest_by_sender.values():
-                log.info("Message from %s", msg.sender)
-                log.debug("Message from %s: %s", msg.sender, msg.text[:100])
+                log.info("Message from %s", mask_phone(msg.sender))
+                log.debug("Message from %s: %s", mask_phone(msg.sender), msg.text[:100])
 
                 # Process with per-sender lock (debounce happens inside)
                 lock = sender_locks.setdefault(msg.sender, asyncio.Lock())
@@ -243,28 +245,28 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
             newer = await monitor.get_new_messages(msg.rowid)
             newer_from_same = [m for m in newer if m.sender == msg.sender]
             if newer_from_same:
-                log.debug("Skipping debounced message from %s", msg.sender)
+                log.debug("Skipping debounced message from %s", mask_phone(msg.sender))
                 return
         except Exception as e:
             log.warning("Debounce check failed (proceeding anyway): %s", e)
 
         try:
-            log.info("IN  %s: %s", msg.sender, msg.text[:200])
+            log.info("IN  %s: %s", mask_phone(msg.sender), msg.text[:200])
             # Show typing indicator while processing
             await sender.start_typing(msg.sender)
             response = await executor.handle_message(msg.sender, msg.text)
             await sender.stop_typing()
-            log.info("OUT %s: %s", msg.sender, response[:200])
+            log.info("OUT %s: %s", mask_phone(msg.sender), response[:200])
             await sender.send_text(msg.sender, response)
         except Exception as e:
-            log.error("Error processing message from %s: %s", msg.sender, e)
+            log.error("Error processing message from %s: %s", mask_phone(msg.sender), e)
             await sender.stop_typing()
             try:
                 await sender.send_text(
                     msg.sender, ERROR_GENERIC
                 )
             except Exception:
-                log.error("Failed to send error message to %s", msg.sender)
+                log.error("Failed to send error message to %s", mask_phone(msg.sender))
 
 
 async def _check_accessibility() -> None:
@@ -342,7 +344,7 @@ async def _schedule_digest(
             try:
                 await compressor.run_compression(phone)
             except Exception as e:
-                log.error("Compression failed for %s: %s", phone, e)
+                log.error("Compression failed for %s: %s", mask_phone(phone), e)
 
         # Sleep past the target minute to prevent double-fire from sleep imprecision
         now = datetime.datetime.now(tz)

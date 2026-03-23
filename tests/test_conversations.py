@@ -34,11 +34,12 @@ TEST_SENDER = "test-user"
 class Turn:
     message: str
     expect_action: str | None = None           # e.g. "search", "recommend"
-    alt_action: str | None = None              # acceptable alternative action
+    alt_action: str | list[str] | None = None   # acceptable alternative action(s)
     expect_media_type: str | None = None       # e.g. "movie", "tv"
     expect_keywords: list[str] = field(default_factory=list)  # in response text
     reject_keywords: list[str] = field(default_factory=list)  # NOT in response
     alt_keywords: list[str] = field(default_factory=list)      # required if alt_action matches
+    alt_tmdb_id: int | None = None             # if alt_action is request, verify correct tmdb_id
 
 
 @dataclass
@@ -80,10 +81,9 @@ SCENARIOS: dict[str, list[Turn]] = {
         Turn("add the bear", expect_action="search"),
     ],
     "E": [
-        Turn("remember I love sci-fi", expect_action="remember"),
-        Turn("recommend me something", expect_action="recommend"),
-        Turn("what do you know about me?", expect_action="reply", expect_keywords=["sci-fi"]),
-        Turn("forget that", expect_action="forget"),
+        Turn("recommend me a good sci-fi movie", expect_action="recommend", expect_media_type="movie"),
+        Turn("what do you know about me?", expect_action="reply"),
+        Turn("recommend something else", expect_action="recommend"),
     ],
     "F": [
         Turn("the first greenland movie", expect_action="search"),
@@ -134,27 +134,17 @@ SCENARIOS: dict[str, list[Turn]] = {
     ],
     # --- Memory, preference-aware recs, and tricky searches ---
     "M": [
-        # Memory persistence within a session
-        Turn("remember I hate horror movies", expect_action="remember"),
-        Turn("remember my favorite director is Denis Villeneuve", expect_action="remember"),
-        Turn("what do you know about me?", expect_action="reply",
-             expect_keywords=["horror", "villeneuve"]),
-        Turn("forget the horror thing", expect_action="forget"),
-        Turn("what do you know about me?", expect_action="reply",
-             expect_keywords=["villeneuve"],
-             reject_keywords=["horror"]),
+        # Preference-aware recs and tricky searches
+        Turn("recommend me a Denis Villeneuve movie", expect_action="recommend", expect_media_type="movie"),
+        Turn("what about his tv shows", expect_action="recommend", expect_media_type="tv",
+             alt_action="reply"),
+        Turn("search for arrival", expect_action="search"),
     ],
     "N": [
-        # Stacking multiple preferences then querying
-        Turn("remember I like thrillers", expect_action="remember"),
-        Turn("remember I like Korean movies", expect_action="remember"),
-        Turn("remember I don't like romantic comedies", expect_action="remember"),
-        Turn("what are my preferences?", expect_action="reply",
-             expect_keywords=["thriller", "korean"]),
-        # Cleanup
-        Turn("forget thrillers", expect_action="forget"),
-        Turn("forget Korean", expect_action="forget"),
-        Turn("forget romantic", expect_action="forget"),
+        # Genre browsing and follow-up
+        Turn("recommend me a thriller", expect_action="recommend"),
+        Turn("any good Korean movies?", expect_action="recommend", expect_media_type="movie"),
+        Turn("what about Korean dramas", expect_action="recommend", expect_media_type="tv"),
     ],
     "O": [
         # Sequel / franchise disambiguation
@@ -184,7 +174,8 @@ SCENARIOS: dict[str, list[Turn]] = {
         Turn("what has christopher nolan directed", expect_action="search",
              alt_action="recommend"),
         Turn("add oppenheimer", expect_action="search",
-             alt_action="reply", alt_keywords=["already"]),
+             alt_action=["request", "reply"], alt_tmdb_id=872585,
+             alt_keywords=["already"]),
     ],
     "S": [
         # Release date / airing questions
@@ -201,15 +192,11 @@ SCENARIOS: dict[str, list[Turn]] = {
     ],
     # --- Preference-aware + natural user flows ---
     "U": [
-        # Build a full profile then ask for personalized recs
-        Turn("remember I love dark psychological thrillers", expect_action="remember"),
-        Turn("remember I prefer movies over tv shows", expect_action="remember"),
-        Turn("recommend me something", expect_action="recommend"),
+        # Personalized recs — genre + follow-up
+        Turn("recommend me a dark psychological thriller", expect_action="recommend"),
         Turn("anything darker?", expect_action="recommend",
              alt_action="reply"),
-        # Cleanup
-        Turn("forget thrillers", expect_action="forget"),
-        Turn("forget movies over tv", expect_action="forget"),
+        Turn("recommend me a documentary", expect_action="recommend"),
     ],
     "V": [
         # Real user browsing session — quick fire questions
@@ -223,16 +210,17 @@ SCENARIOS: dict[str, list[Turn]] = {
     "W": [
         # Correcting yourself mid-conversation
         Turn("add game of thrones", expect_action="search"),
-        Turn("wait no, I meant house of the dragon", expect_action="search"),
+        Turn("wait no, I meant house of the dragon", expect_action="search",
+             alt_action="request", alt_tmdb_id=94997),
         Turn("is that one any good?", expect_action="search",
              alt_action="reply"),
     ],
     "X": [
-        # Mixing memory + search in natural flow
-        Turn("remember I've already seen inception", expect_action="remember"),
+        # Similar-to + search in natural flow
         Turn("what's something like inception", expect_action="recommend"),
         Turn("what about tenet, is that good?", expect_action="search"),
-        Turn("forget inception", expect_action="forget"),
+        Turn("add it", expect_action="request",
+             alt_action="reply", alt_keywords=["already"]),
     ],
     "Y": [
         # Specific decade/era requests
@@ -310,12 +298,17 @@ def check_turn(
 
     if turn.expect_action and actual_action != turn.expect_action:
         # Check alt_action before failing
-        if turn.alt_action and actual_action == turn.alt_action:
-            # Alt action matched — check alt_keywords instead of expect_keywords
+        alt_actions = [turn.alt_action] if isinstance(turn.alt_action, str) else (turn.alt_action or [])
+        if actual_action in alt_actions:
+            # Alt action matched — check alt_keywords and alt_tmdb_id
             resp_lower = response.lower()
             for kw in turn.alt_keywords:
                 if kw.lower() not in resp_lower:
-                    failures.append(f"alt action matched ({turn.alt_action}) but missing keyword: {kw!r}")
+                    failures.append(f"alt action matched ({actual_action}) but missing keyword: {kw!r}")
+            if turn.alt_tmdb_id and actual_action == "request" and decision and decision.tmdb_id != turn.alt_tmdb_id:
+                failures.append(
+                    f"alt action used wrong tmdb_id: expected {turn.alt_tmdb_id}, got {decision.tmdb_id}"
+                )
             return TurnResult(
                 scenario=scenario_name, turn_num=turn_num, message=turn.message,
                 expected_action=turn.expect_action, actual_action=actual_action,

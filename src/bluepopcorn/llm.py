@@ -8,12 +8,11 @@ import time
 from pathlib import Path
 
 from .config import Settings
-from .types import LLM_JSON_SCHEMA, LLMDecision
+from .prompts import COMPRESSION_SYSTEM_PROMPT, SYSTEM_PROMPT
+from .schemas import DECIDE_SCHEMA
+from .types import LLMDecision
 
 log = logging.getLogger(__name__)
-
-# Project root (where personality.md and instructions.md live)
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
 class LLMClient:
@@ -21,25 +20,10 @@ class LLMClient:
         self.model = settings.model
         self.fallback_model = settings.fallback_model
         self.timeout = settings.llm_timeout
-        self._system_prompt: str | None = None
         # Resolve claude CLI path at init (may not be in PATH for launchd)
         self._claude_path = shutil.which("claude") or str(
             Path.home() / ".local" / "bin" / "claude"
         )
-
-    def _load_system_prompt(self) -> str:
-        """Load personality.md + instructions.md as inline system prompt."""
-        if self._system_prompt is not None:
-            return self._system_prompt
-
-        parts: list[str] = []
-        for filename in ("personality.md", "instructions.md"):
-            path = PROJECT_ROOT / filename
-            if path.exists():
-                parts.append(path.read_text().strip())
-
-        self._system_prompt = "\n\n".join(parts)
-        return self._system_prompt
 
     async def _call_claude(
         self,
@@ -126,14 +110,14 @@ class LLMClient:
         """Call claude -p and return the structured decision.
 
         Returns (decision, metadata) where metadata includes cost, duration, etc.
-        Pass schema to override the default LLM_JSON_SCHEMA (e.g. LLM_RESPOND_SCHEMA).
+        Pass schema to override the default DECIDE_SCHEMA (e.g. RESPOND_SCHEMA).
         """
         use_model = model or self.model
-        system_prompt = self._load_system_prompt()
+        system_prompt = SYSTEM_PROMPT
 
         try:
             structured, duration = await self._call_claude(
-                prompt, schema or LLM_JSON_SCHEMA, system_prompt, use_model,
+                prompt, schema or DECIDE_SCHEMA, system_prompt, use_model,
                 label="decide",
             )
         except (asyncio.TimeoutError, RuntimeError) as e:
@@ -161,7 +145,7 @@ class LLMClient:
         self,
         prompt: str,
         schema: dict,
-        system_prompt: str = "You are a helpful assistant that summarizes conversations.",
+        system_prompt: str = COMPRESSION_SYSTEM_PROMPT,
         model: str | None = None,
     ) -> dict:
         """Call claude -p with a custom JSON schema and return the raw dict.

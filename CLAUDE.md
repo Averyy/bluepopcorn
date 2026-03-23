@@ -14,7 +14,9 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
 - **After code changes, run `./restart.sh`** -- always restart the daemon after modifying Python code
 - **NEVER trigger real Seerr requests when testing** -- CLI tests hit the live API. Only test read-only flows (search, recommend, status, info). Do NOT test "add it", number picking, or any flow that triggers `action=request` / `request_media`. If you need to verify request logic, read the code — don't execute it
-- **After significant changes to prompts, actions, or LLM routing, run the conversation tests** -- `uv run python tests/test_conversations.py -s A,E,I` for a quick smoke test (~5 min), or the full suite for thorough validation. Significant = changes to personality.md, instructions.md, actions/*.py, llm.py, or _build_prompt
+- **After significant changes to prompts, actions, or LLM routing, run the conversation tests** -- `uv run python tests/test_conversations.py -s A,E,I` for a quick smoke test (~5 min), or the full suite for thorough validation. Significant = changes to prompts.py, actions/*.py, llm.py, or _build_prompt
+- **ALL LLM-facing text must live in `prompts.py`** -- system prompt, status labels, context templates, scenario instructions, compression prompts, error messages. Never hardcode prompt strings in handler files. NEVER move LLM-facing text out of prompts.py into other modules to solve import issues — fix the import issue instead
+- **ALL JSON schemas must live in `schemas.py`** -- decide schema, respond schema, compression schemas. Never define schemas inline in other files
 
 ## Commands
 
@@ -43,28 +45,30 @@ codesign --force --sign - BluePopcorn.app                          # Ad-hoc sign
 
 ## Key References
 
-- @personality.md -- Bot tone (loaded into LLM system prompt)
-- @instructions.md -- Action routing rules (loaded into LLM system prompt)
+- prompts.py -- All LLM-facing text (system prompt, status labels, context templates, instructions, error messages)
+- schemas.py -- All JSON schemas and XML tag constants
 - docs/ref-seerr-api.md -- Seerr API reference (enums, endpoints, params)
 - config.toml -- Non-secret settings
 
 ## Architecture: Two-Call Pattern
 
-Haiku decides the action (call 1), Python executes the API call, then Haiku crafts the response using conversation history + API results as context (call 2). Python only formats responses as a fallback if the second LLM call fails.
+Haiku decides the action (call 1), Python executes the API call, then Haiku crafts the response using conversation history + API results as context (call 2).
 
 ```
 User text → Haiku (action) → Python executes API → store results as context → Haiku (response) → send
 ```
 
-Only exceptions: bypass commands (status/help/new) and remember/forget use Python responses directly.
+Only exception: bypass commands (status/help/new) use Python responses directly.
 
 ## File Layout
 
 Each external service is its own module:
 
+- `prompts.py` -- All LLM-facing text (system prompt, status labels, context templates, instructions, error messages)
+- `schemas.py` -- All JSON schemas and XML tag constants
 - `seerr.py` -- Seerr API client (search, request, discover, ratings, genres)
 - `morning_digest.py` -- Composes daily digest from seerr data
-- `actions/` -- Action dispatch + handler package (search, request, status, recent, recommend, memory)
+- `actions/` -- Action dispatch + handler package (search, request, recent, recommend)
 - Adding a new service = new file + new handler in actions.py
 
 ## Seerr Integration

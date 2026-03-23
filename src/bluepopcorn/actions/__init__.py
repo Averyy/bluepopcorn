@@ -15,20 +15,29 @@ from ..monitor import MessageMonitor
 from ..posters import PosterHandler
 from ..seerr import SeerrClient
 from ..sender import MessageSender
-from ..types import Action, HistoryEntry, LLM_RESPOND_SCHEMA, LLMDecision, SearchResult
-from ._base import ERROR_GENERIC, apply_ratings
+from ..prompts import (
+    CONTEXT_EMPTY_REPLY,
+    CONVERSATION_GAP,
+    CURRENT_MESSAGE_DELIMITER,
+    ERROR_GENERIC,
+    INSTRUCTION,
+    LAST_DISCUSSED_TITLE,
+    TIME_CONTEXT,
+)
+from ..schemas import RESPOND_SCHEMA, TAG_CONTEXT, TAG_MEMORY
+from ..types import Action, HistoryEntry, LLMDecision, SearchResult
+from ..utils import mask_phone
+from ._base import apply_ratings
 
 # Handler imports
 from .search import handle_search
 from .request import handle_request
 from .recent import handle_recent
 from .recommend import handle_recommend
-from .memory import handle_remember, handle_forget
 
 log = logging.getLogger(__name__)
 
-# Re-export for public API compatibility
-__all__ = ["ActionExecutor", "ERROR_GENERIC"]
+__all__ = ["ActionExecutor"]
 
 
 def _escape_xml_delimiters(text: str) -> str:
@@ -75,7 +84,11 @@ class ActionExecutor:
     # ── Context buffer helpers ───────────────────────────────────
 
     def _add_context(self, sender: str, text: str) -> None:
-        """Add a context entry to the in-memory buffer."""
+        """Add a context entry to the in-memory buffer.
+
+        Content is stored raw. XML escaping happens at render time in
+        _build_prompt (timeline) and _llm_respond (new context entries).
+        """
         entries = self._context.setdefault(sender, [])
         entries.append((time.time(), text))
         if len(entries) > 50:
@@ -113,18 +126,16 @@ class ActionExecutor:
         prompt = await self._build_prompt(sender_phone)
         # Mark the current message with a strong delimiter so the LLM focuses on it
         # (chat.db history can be noisy with old conversations)
-        prompt += (
-            "\n---\n"
-            "[CURRENT MESSAGE — respond to this. Everything above is history for context only.]\n"
-            f"<current_user_message>{_escape_xml_delimiters(text)}</current_user_message>"
-        )
+        prompt += CURRENT_MESSAGE_DELIMITER.format(text=_escape_xml_delimiters(text))
         # Inject last-discussed topic so the LLM knows what "it" refers to
         # Includes tmdb_id + media_type so the LLM can request directly
         # Skip if a conversation gap was detected (stale topic from old conversation)
         topic = self._last_topic.get(sender_phone)
         if topic and not self._has_gap.get(sender_phone, False):
             safe_title = _escape_xml_delimiters(topic["title"])
-            prompt += f"\n[Last discussed title: {safe_title} tmdb:{topic['tmdb_id']} {topic['media_type']}]"
+            prompt += "\n" + LAST_DISCUSSED_TITLE.format(
+                title=safe_title, tmdb_id=topic["tmdb_id"], media_type=topic["media_type"],
+            )
         self._prompt_cache[sender_phone] = prompt
         self._prompt_cache_ctx_count[sender_phone] = len(self._context.get(sender_phone, []))
 
@@ -136,7 +147,7 @@ class ActionExecutor:
             log.error("LLM call failed: %s", e)
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
-            return "Server error, please try again later."
+            return ERROR_GENERIC
 
         # Execute the action
         try:
@@ -149,65 +160,30 @@ class ActionExecutor:
 
         return response
 
-    async def _llm_respond(self, sender_phone: str, fallback: str = "", intent: str | None = None) -> tuple[str, bool]:
+    async def _llm_respond(self, sender_phone: str, scenario: str = "empty_reply") -> tuple[str, bool]:
         """Build prompt with current context and let the LLM generate a response.
 
         Reuses the cached base prompt from handle_message when available,
         appending only the new context entries added by the handler.
 
-        ``intent`` controls the LLM instruction style:
-        - "search": focus on top result, describe it
-        - "disambiguate": present numbered options, ask which one
-        - "recommend": present numbered picks, ask if they want to add any
-        - "recent": present server state (available + requested/downloading)
-        - None: generic summarize
+        ``scenario`` selects the instruction from INSTRUCTION dict in prompts.py.
         """
         cached = self._prompt_cache.get(sender_phone)
         if cached is not None:
             # Append only context entries added since the cache was built
             cache_count = self._prompt_cache_ctx_count.get(sender_phone, 0)
             new_ctx = self._context.get(sender_phone, [])[cache_count:]
-            extra = "\n".join(f"<context>{text}</context>" for _ts, text in new_ctx)
+            extra = "\n".join(f"<{TAG_CONTEXT}>{_escape_xml_delimiters(text)}</{TAG_CONTEXT}>" for _ts, text in new_ctx)
             prompt = cached + "\n" + extra if extra else cached
         else:
             prompt = await self._build_prompt(sender_phone)
-        base = (
-            "The results above have already been fetched. "
-            "Do NOT search, recommend, or take any action. "
-            "Use action=reply. If the user is confirming they want to add a title "
-            "shown in the results, you may use action=request with the correct tmdb_id and media_type. "
-            "Set multiple_results=true if you are presenting multiple numbered options, "
-            "false if focusing on a single title."
-        )
-        if intent == "search":
-            instruction = (
-                f"{base} Present the search results to the user. "
-                "If there's one clear match for what the user asked, focus on it — "
-                "describe it, mention ratings, and note its status. "
-                "If there are multiple plausible matches, present them numbered and ask which one. "
-                "Use your judgment based on the query and results."
-            )
-        elif intent == "recommend":
-            instruction = (
-                f"{base} Present these as numbered picks for the user to browse. "
-                "Mention ALL results shown with brief descriptions. "
-                "End with asking if they want to add any."
-            )
-        elif intent == "recent":
-            instruction = (
-                f"{base} Present the server state. Group by what's available and what's been requested. "
-                "Use the exact status from the results. Include brief descriptions."
-            )
-        elif intent == "dedup":
-            instruction = (
-                f"{base} The user wanted to add this title but it's already on the server. "
-                "Inform them of its current status naturally."
-            )
-        else:
-            instruction = f"{base} Write a reply message summarizing the results."
+        instruction = INSTRUCTION.get(scenario)
+        if instruction is None:
+            log.error("Unknown scenario key %r in _llm_respond", scenario)
+            return ERROR_GENERIC, False
         prompt += f"\n---\n[INSTRUCTION: {instruction}]"
         try:
-            decision, meta = await self.llm.decide(prompt, schema=LLM_RESPOND_SCHEMA)
+            decision, meta = await self.llm.decide(prompt, schema=RESPOND_SCHEMA)
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
             multi = decision.multiple_results
             # Allow request as a follow-up (user confirms a search result)
@@ -220,10 +196,10 @@ class ActionExecutor:
                 "LLM response returned action=%s message=%r instead of reply, using fallback",
                 decision.action.value, (decision.message or "")[:100],
             )
-            return fallback or ERROR_GENERIC, False
+            return ERROR_GENERIC, False
         except Exception as e:
             log.error("LLM response call failed: %s", e)
-            return fallback or ERROR_GENERIC, False
+            return ERROR_GENERIC, False
 
     async def _build_prompt(self, sender_phone: str) -> str:
         """Build the full prompt from memory + chat.db messages + context buffer."""
@@ -233,12 +209,13 @@ class ActionExecutor:
         tz = ZoneInfo(self.settings.timezone)
         now = datetime.datetime.now(tz)
         time_str = now.strftime("%A %B %-d, %Y %-I:%M %p %Z")
-        parts.append(f"<context>[Current time: {time_str}]</context>")
+        parts.append(TIME_CONTEXT.format(time=time_str))
 
         # Per-user memory (markdown file) — run in thread to avoid blocking event loop
         memory_content = await asyncio.to_thread(self.memory.load, sender_phone)
         if memory_content:
-            parts.append(f"<memory>\n{memory_content.strip()}\n</memory>")
+            safe_memory = _escape_xml_delimiters(memory_content.strip())
+            parts.append(f"<{TAG_MEMORY}>\n{safe_memory}\n</{TAG_MEMORY}>")
 
         # Get messages: chat.db in daemon mode, _cli_history in CLI mode
         if self.monitor is not None:
@@ -265,14 +242,14 @@ class ActionExecutor:
             if now - ts > gap_seconds * 2:
                 continue  # Evict context entries older than 2x gap threshold
             if session_start is None or ts >= session_start:
-                timeline.append((ts, "context", text))
+                timeline.append((ts, TAG_CONTEXT, text))
         timeline.sort(key=lambda x: x[0])
 
         msg_count = sum(1 for _, tag, _ in timeline if tag in ("user", "assistant"))
-        ctx_count = sum(1 for _, tag, _ in timeline if tag == "context")
+        ctx_count = sum(1 for _, tag, _ in timeline if tag == TAG_CONTEXT)
         log.debug(
             "Prompt for %s: %d messages, %d context entries, memory=%s",
-            sender_phone, msg_count, ctx_count, bool(memory_content),
+            mask_phone(sender_phone), msg_count, ctx_count, bool(memory_content),
         )
 
         # Render with gap markers for 2+ hour gaps
@@ -280,7 +257,7 @@ class ActionExecutor:
         has_gap = False
         for ts, tag, content in timeline:
             if prev_ts > 0 and ts - prev_ts >= gap_seconds:
-                parts.append("[The above messages are from a previous conversation. Treat the following as a new, separate conversation — do not assume topic continuity.]")
+                parts.append(CONVERSATION_GAP)
                 has_gap = True
             safe = _escape_xml_delimiters(content)
             parts.append(f"<{tag}>{safe}</{tag}>")
@@ -326,15 +303,11 @@ class ActionExecutor:
             return await handle_recent(self, decision, sender_phone)
         elif decision.action == Action.RECOMMEND:
             return await handle_recommend(self, decision, sender_phone)
-        elif decision.action == Action.REMEMBER:
-            return await handle_remember(self, decision, sender_phone)
-        elif decision.action == Action.FORGET:
-            return await handle_forget(self, decision, sender_phone)
         else:  # REPLY
             if decision.message and decision.message.strip():
                 return decision.message.strip()
-            executor._add_context(sender_phone, "[Reply action: LLM returned empty message]")
-            return (await self._llm_respond(sender_phone, intent=None))[0]
+            self._add_context(sender_phone, CONTEXT_EMPTY_REPLY)
+            return (await self._llm_respond(sender_phone, scenario="empty_reply"))[0]
 
     async def _prepare_poster(self, result: SearchResult):
         """Download a single poster image. Returns local path or None."""
@@ -351,8 +324,7 @@ class ActionExecutor:
         sender_phone: str,
         display_results: list[SearchResult],
         *,
-        fallback: str,
-        intent: str,
+        scenario: str,
         skip_poster: bool = False,
     ) -> str:
         """Run LLM response in parallel with poster download, then send posters.
@@ -370,7 +342,7 @@ class ActionExecutor:
         if not skip_poster and not all_shown and self.posters and self.sender and display_results:
             download_task = asyncio.create_task(self.posters.download_all(display_results))
 
-        response, multi = await self._llm_respond(sender_phone, fallback=fallback, intent=intent)
+        response, multi = await self._llm_respond(sender_phone, scenario=scenario)
 
         if download_task:
             try:
@@ -459,7 +431,9 @@ class ActionExecutor:
         self, sender_phone: str, title: str, decision: LLMDecision
     ) -> None:
         """Store context about the requested/discussed title for future narrowing."""
-        ctx = f"[Last discussed: {title} tmdb:{decision.tmdb_id} {decision.media_type}]"
+        ctx = LAST_DISCUSSED_TITLE.format(
+            title=title, tmdb_id=decision.tmdb_id, media_type=decision.media_type,
+        )
         self._add_context(sender_phone, ctx)
         self._last_topic[sender_phone] = {
             "title": title,
