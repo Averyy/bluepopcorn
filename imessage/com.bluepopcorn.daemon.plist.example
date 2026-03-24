@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/bluepopcorn/BluePopcorn.app/Contents/MacOS/BluePopcorn</string>
+        <string>/path/to/bluepopcorn/imessage/BluePopcorn.app/Contents/MacOS/BluePopcorn</string>
     </array>
 
     <key>WorkingDirectory</key>

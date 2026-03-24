@@ -9,11 +9,10 @@ import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import Settings
+from .seerr import TMDB_IMAGE_BASE
 from .types import SearchResult
 
 log = logging.getLogger(__name__)
-
-TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
 
 class PosterHandler:

@@ -62,17 +62,6 @@ def format_search_results(results: list[SearchResult], query: str | None = None)
     return "\n".join(lines)
 
 
-def apply_ratings(result: SearchResult, rating_dict: dict) -> None:
-    """Apply enriched ratings from get_ratings() to a SearchResult."""
-    rt = rating_dict.get("rt")
-    freshness = rating_dict.get("rt_freshness")
-    if rt and freshness:
-        result.rt_rating = f"{rt} {freshness}"
-    elif rt:
-        result.rt_rating = rt
-    result.imdb_rating = rating_dict.get("imdb")
-
-
 def filter_available(results: list[SearchResult], take: int = 3) -> list[SearchResult]:
     """Prefer results the user doesn't already have for recommendations."""
     new = [r for r in results if r.status not in (

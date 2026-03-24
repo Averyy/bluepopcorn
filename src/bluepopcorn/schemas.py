@@ -1,4 +1,4 @@
-"""All JSON schemas for LLM calls."""
+"""All JSON schemas for LLM calls and MCP tool input schemas."""
 
 # ── Call-1 schema (action decision) ──────────────────────────────────
 
@@ -104,3 +104,132 @@ ROLLUP_SCHEMA = {
 
 TAG_MEMORY = "memory"
 TAG_CONTEXT = "context"
+
+# ── MCP tool input schemas ──────────────────────────────────────────
+
+MCP_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Search query (title, optionally with year)",
+        },
+        "media_type": {
+            "type": "string",
+            "enum": ["movie", "tv"],
+            "description": "Filter results by type (optional)",
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+MCP_DETAILS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tmdb_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "TMDB ID of the title",
+        },
+        "media_type": {
+            "type": "string",
+            "enum": ["movie", "tv"],
+            "description": "Whether this is a movie or TV show",
+        },
+    },
+    "required": ["tmdb_id", "media_type"],
+    "additionalProperties": False,
+}
+
+MCP_REQUEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tmdb_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "TMDB ID of the title to request",
+        },
+        "media_type": {
+            "type": "string",
+            "enum": ["movie", "tv"],
+            "description": "Whether this is a movie or TV show",
+        },
+        "seasons": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "Specific season numbers to request (TV only, optional — defaults to all)",
+        },
+    },
+    "required": ["tmdb_id", "media_type"],
+    "additionalProperties": False,
+}
+
+MCP_RECOMMEND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "genre": {
+            "type": "string",
+            "description": "Genre name (e.g. 'sci-fi', 'comedy', 'thriller')",
+        },
+        "keyword": {
+            "type": "string",
+            "description": "Thematic keyword (e.g. 'time travel', 'robots', 'heist')",
+        },
+        "similar_to": {
+            "type": "string",
+            "description": "Title name to find similar content (e.g. 'Inception')",
+        },
+        "media_type": {
+            "type": "string",
+            "enum": ["movie", "tv"],
+            "description": "Filter by type (optional)",
+        },
+        "year": {
+            "type": "integer",
+            "description": "Year or start of year range",
+        },
+        "year_end": {
+            "type": "integer",
+            "description": "End of year range (e.g. year=2020, year_end=2029 for '2020s')",
+        },
+        "trending": {
+            "type": "boolean",
+            "description": "Show currently trending titles",
+        },
+        "upcoming": {
+            "type": "boolean",
+            "description": "Show upcoming releases",
+        },
+        "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Number of results (default 5, max 10)",
+        },
+        "exclude_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "TMDB IDs to exclude — use for 'show me more' by passing previously shown tmdb_ids",
+        },
+    },
+    "additionalProperties": False,
+}
+
+MCP_RECENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "Number of items per section (default 10)",
+        },
+        "page": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Page number for pagination (default 1)",
+        },
+    },
+    "additionalProperties": False,
+}

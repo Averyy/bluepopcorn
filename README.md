@@ -1,129 +1,141 @@
-# BluePopcorn
+# BluePopcorn — Seerr Chatbot & MCP Server
 
-iMessage bot for Seerr media requests. Runs on a Mac Mini, uses Claude Haiku for natural language understanding.
+Smart media requests for Seerr. MCP server + iMessage chatbot for searching, discovering, and requesting movies and TV shows.
 
-## What It Does
+Unlike raw API wrappers, BluePopcorn handles fuzzy search with fallback chains, automatic year extraction, genre resolution for compound queries ("sci-fi comedy"), duplicate detection, and TV season auto-fetching.
 
-Text the bot to:
-- **Add movies/shows** — "add severance" → searches TMDB → shows poster → confirms → requests on Seerr
-- **Ask about titles** — "what's The Abandons about?" → searches and describes with TMDB rating + trailer link
-- **Get recommendations** — "good sci-fi from 2026?" → searches TMDB and presents options
-- **See what's new** — "what's been added?" → recently added movies/shows from Seerr
-- **Check requests** — "status" → pending Seerr requests
-- **Remember things** — "remember I like sci-fi" → stores per-user preferences in markdown memory files
+## Quick Start
 
-### Proactive Notifications
-- **Morning digest** — media status at a configurable time
-- **Seerr webhooks** — alerts when media is approved, available, or fails
-- **Quiet hours** — no proactive messages between 22:00-07:00
-
-### Commands
-
-| Text | What happens |
-|------|-------------|
-| "add severance" | Search + poster + request flow |
-| "what's X about" | Search + describe with rating/trailer |
-| "recommend a thriller" | TMDB search for the genre |
-| "what's new" | Recently added media from Seerr |
-| "status" / "pending" | Pending Seerr requests (no LLM) |
-| "new" / "reset" / "clear" | Clear conversation history |
-| "remember I like sci-fi" | Store user preference |
-| "forget sci-fi" | Remove stored preference |
-| "help" | Show all capabilities |
-
-## Architecture
-
-```
-iMessage (chat.db poll) → Python daemon → claude -p (Haiku) → structured JSON
-                                        ↕                       ↓
-                        AppleScript send ←                 Python executes + formats
-                                                           (Seerr API, posters)
-```
-
-Single async Python daemon. Two LLM calls per message — Haiku returns a structured JSON decision (call 1: `{"action": "search", "query": "severance"}`), Python executes the API call, then Haiku crafts the natural-language response using the results as context (call 2). Python formats directly only as a fallback if call 2 fails.
-
-### How It Works
-- **Conversation history**: chat.db bidirectional reads + in-memory context buffer, session boundaries via "new"/"reset"
-- **Per-user memory**: Markdown files with tiered compression (daily → weekly → monthly), injected into every LLM prompt
-- **Time context**: current date/time included in every call
-- **Poster intelligence**: collage for disambiguation ("add avatar"), single poster for info queries
-## Stack
-
-- Python 3.12, asyncio
-- Claude Haiku via `claude -p` CLI (Pro/Max subscription, no API fees)
-- httpx (Seerr API)
-- aiosqlite (chat.db reads)
-- Pillow (poster collages)
-- AppleScript (iMessage sending + typing indicator)
-
-## Setup
-
-### Prerequisites
-- Mac with iMessage signed in (bot Apple ID)
-- Full Disk Access + Accessibility permissions for the `BluePopcorn` binary
-- Seerr instance with a local bot user
-- Claude Code CLI installed and authenticated
-
-### Install
 ```bash
 git clone <repo>
 cd bluepopcorn
-cp .env.example .env  # Fill in credentials
+cp .env.example .env   # fill in SEERR_URL, SEERR_API_KEY, MCP_API_KEY
 uv sync
+uv run -m bluepopcorn.mcp           # HTTP server (default :8080)
+uv run -m bluepopcorn.mcp --stdio   # stdio for local clients
 ```
 
-### Configure
-- `.env` — Seerr credentials, bot Apple ID, allowed phone numbers
-- `config.toml` — Model, poll interval, location, quiet hours
-- `personality.md` — Bot tone/personality
-- `instructions.md` — Action routing rules for the LLM
+## Client Configuration
 
-### Run
+### Claude Code (stdio)
+
 ```bash
-uv run -m bluepopcorn --cli      # CLI test mode (no iMessage)
-uv run -m bluepopcorn --digest   # One-shot morning digest
-uv run -m bluepopcorn            # Daemon (production)
+claude mcp add bluepopcorn -- uv run --directory /path/to/bluepopcorn -m bluepopcorn.mcp --stdio
 ```
 
-### Auto-start (launchd)
+Or in JSON config:
+```json
+{
+  "mcpServers": {
+    "bluepopcorn": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/bluepopcorn", "-m", "bluepopcorn.mcp", "--stdio"]
+    }
+  }
+}
+```
+
+### Claude Desktop (stdio)
+
+```json
+{
+  "mcpServers": {
+    "bluepopcorn": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/bluepopcorn", "-m", "bluepopcorn.mcp", "--stdio"]
+    }
+  }
+}
+```
+
+### Claude Desktop (HTTP)
+
+```json
+{
+  "mcpServers": {
+    "bluepopcorn": {
+      "type": "streamable-http",
+      "url": "http://YOUR_HOST:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_API_KEY"
+      }
+    }
+  }
+}
+```
+
+### Cursor / VS Code
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "bluepopcorn": {
+        "type": "streamable-http",
+        "url": "http://YOUR_HOST:8080/mcp",
+        "headers": {
+          "Authorization": "Bearer YOUR_MCP_API_KEY"
+        }
+      }
+    }
+  }
+}
+```
+
+## Tools
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `seerr_search` | Search movies and TV shows by title | `query`, `media_type?` |
+| `seerr_details` | Full details by TMDB ID (ratings, trailers, seasons) | `tmdb_id`, `media_type` |
+| `seerr_request` | Request a title for download (dedup built-in) | `tmdb_id`, `media_type`, `seasons?` |
+| `seerr_recommend` | Discover by genre, keyword, similarity, or trending | `genre?`, `keyword?`, `similar_to?`, `trending?`, `upcoming?` |
+| `seerr_recent` | Recently added and pending requests | `page?`, `limit?` |
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SEERR_URL` | Yes | Seerr instance URL (e.g. `http://seerr:5055`) |
+| `SEERR_API_KEY` | Yes | Seerr API key |
+| `MCP_API_KEY` | HTTP mode | Bearer token for HTTP auth (comma-separated for multiple keys) |
+| `HTTP_PORT` | No | HTTP listen port (default `8080`) |
+| `HTTP_HOST` | No | HTTP listen host (default `127.0.0.1`) |
+| `HTTP_TIMEOUT` | No | Seerr API timeout in seconds (default `15`) |
+
+## iMessage Bot (optional, macOS only)
+
+BluePopcorn also includes an iMessage bot that runs as a macOS daemon. This is separate from the MCP server.
+
 ```bash
+uv sync --extra imessage
+# edit imessage/config.toml with your settings
+# add to .env: ANTHROPIC_API_KEY, ALLOWED_SENDERS (E.164 phone numbers)
+uv run -m bluepopcorn --cli                    # CLI test mode
+uv run -m bluepopcorn                          # daemon mode
+```
+
+### Daemon Setup
+
+```bash
+cd imessage
 swiftc -o BluePopcorn.app/Contents/MacOS/BluePopcorn wrapper.swift
 codesign --force --sign - BluePopcorn.app
-
-cp com.bluepopcorn.daemon.plist ~/Library/LaunchAgents/
+cp com.bluepopcorn.daemon.plist.example ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist
+# Edit the plist to set your paths, then:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist
 ```
 
-**Permissions** — both must be added manually (no automatic prompts):
-1. System Settings → Privacy & Security → **Full Disk Access** → `+` → select `BluePopcorn.app` (required for reading chat.db)
-2. System Settings → Privacy & Security → **Accessibility** → `+` → select `BluePopcorn.app` (required for typing indicators)
+Requires Full Disk Access + Accessibility permissions for `BluePopcorn.app` in System Settings.
 
-After recompiling, remove and re-add `BluePopcorn.app` in both lists (the code signature changes).
+## Network Access
 
-## Project Structure
+BluePopcorn needs local network access to reach your Seerr instance. When your MCP client prompts for local network permission, **you must allow it** — otherwise BluePopcorn can't connect to Seerr and all tools will fail.
 
-```
-bluepopcorn/
-  .env                    # Secrets (gitignored)
-  config.toml             # Non-secret settings
-  personality.md          # Bot tone (→ LLM system prompt)
-  instructions.md         # Action routing (→ LLM system prompt)
-  wrapper.swift           # Swift wrapper (compiled into BluePopcorn.app bundle)
-  BluePopcorn.app/        # macOS app bundle (binary gitignored, Info.plist tracked)
-  data/memory/            # Per-user markdown memory files (gitignored)
-  src/bluepopcorn/
-    __main__.py           # Entry point, daemon loop
-    config.py             # Settings from .env + config.toml
-    types.py              # Dataclasses, enums, JSON schema
-    llm.py                # claude -p subprocess wrapper
-    memory.py             # Per-user markdown memory manager
-    compression.py        # Tiered memory compression (daily/weekly/monthly)
-    actions/              # Action dispatch + handler package (search, request, status, etc.)
-    seerr.py              # Seerr API client (search, request, discover, ratings)
-    morning_digest.py     # Daily digest (media status from Seerr)
-    monitor.py            # chat.db poller + bidirectional message queries
-    sender.py             # AppleScript iMessage + typing indicator
-    posters.py            # TMDB poster download + Pillow collages
-    webhooks.py           # Seerr webhook listener
-    cli.py                # CLI test mode
-```
+## Auth
+
+**stdio mode:** No auth needed — the MCP client launches the process directly.
+
+**HTTP mode:** Bearer token auth via `MCP_API_KEY` environment variable. All major MCP clients (Claude Code, Claude Desktop, Cursor, VS Code) support setting auth headers in their config. Multiple keys supported (comma-separated) for key rotation.
+
+Note: OAuth 2.1 (needed for claude.ai web connectors) is not yet implemented. Use stdio or HTTP with Bearer token for now.

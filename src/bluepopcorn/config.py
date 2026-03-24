@@ -68,14 +68,16 @@ class Settings:
 
 def load_settings(
     env_path: str = ".env",
-    config_path: str = "config.toml",
+    config_path: str = "imessage/config.toml",
 ) -> Settings:
     """Load settings from .env and config.toml."""
     # Load .env
     env = dotenv_values(env_path)
 
-    # Load config.toml
+    # Load config.toml (resolve relative paths against project root)
     config_file = Path(config_path)
+    if not config_file.is_absolute():
+        config_file = PROJECT_ROOT / config_file
     config: dict = {}
     if config_file.exists():
         with open(config_file, "rb") as f:

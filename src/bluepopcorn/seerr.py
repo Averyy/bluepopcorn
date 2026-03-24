@@ -5,15 +5,18 @@ import logging
 import re
 import time
 import urllib.parse
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from .config import Settings
+if TYPE_CHECKING:
+    from .config import Settings
+
 from .types import MediaStatus, SearchResult
 
 log = logging.getLogger(__name__)
 
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 ALLOWED_LANGUAGES = {"en", "es", "ja", "ko"}
 MIN_YEAR = 2000
 
@@ -78,11 +81,27 @@ class SeerrSearchError(SeerrError):
 
 
 class SeerrClient:
-    def __init__(self, settings: Settings) -> None:
-        self.base_url = settings.seerr_url.rstrip("/")
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout: int = 15,
+    ) -> None:
+        if settings is not None:
+            self.base_url = settings.seerr_url.rstrip("/")
+            _api_key = settings.seerr_api_key
+            _timeout = settings.http_timeout
+        elif base_url is not None and base_url and api_key is not None and api_key:
+            self.base_url = base_url.rstrip("/")
+            _api_key = api_key
+            _timeout = timeout
+        else:
+            raise ValueError("Provide either settings or base_url + api_key")
         self.client = httpx.AsyncClient(
-            timeout=settings.http_timeout,
-            headers={"X-Api-Key": settings.seerr_api_key},
+            timeout=_timeout,
+            headers={"X-Api-Key": _api_key},
         )
         # Dynamic genre maps, loaded lazily
         self._genre_map_movie: dict[str, int] | None = None
@@ -383,11 +402,16 @@ class SeerrClient:
         ]
 
     async def get_media_status(self, media_type: str, tmdb_id: int) -> dict | None:
-        """Get current status of a media item. Returns detail dict or None."""
+        """Get current status of a media item. Returns detail dict or None.
+
+        Raises SeerrConnectionError so callers can distinguish "not found" from "unreachable".
+        """
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             return resp.json()
-        except Exception as e:
+        except SeerrConnectionError:
+            raise
+        except (SeerrError, httpx.HTTPStatusError) as e:
             log.debug("Media status check failed for %s/%d: %s", media_type, tmdb_id, e)
             return None
 
@@ -470,37 +494,38 @@ class SeerrClient:
     ) -> dict[str, Any]:
         """Fetch trailer, air date, download progress, collection, and season count.
 
+        Uses the shared detail cache to avoid redundant API calls.
         Returns dict with None for missing values.
         """
-        try:
-            resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
-            data = resp.json()
-            media_info = data.get("mediaInfo") or {}
-            result: dict[str, Any] = {
-                "trailer": self._extract_trailer(data),
-                "air_date": self._extract_air_date(data, media_type),
-                "download_progress": parse_download_progress(media_info),
-                "collection_id": None,
-                "collection_name": None,
-                "season_count": None,
-            }
-            # Extract collection info for movies
-            collection = data.get("collection")
-            if isinstance(collection, dict) and collection.get("id"):
-                result["collection_id"] = collection["id"]
-                result["collection_name"] = collection.get("name")
-            # Extract season count for TV
-            if media_type == "tv":
-                seasons = data.get("seasons", [])
-                result["season_count"] = len([s for s in seasons if s.get("seasonNumber", 0) > 0])
-            return result
-        except Exception as e:
-            log.debug("Detail extras failed for %s/%d: %s", media_type, tmdb_id, e)
-            return {"trailer": None, "air_date": None, "download_progress": None,
-                    "collection_id": None, "collection_name": None, "season_count": None}
+        _empty: dict[str, Any] = {
+            "trailer": None, "air_date": None, "download_progress": None,
+            "collection_id": None, "collection_name": None, "season_count": None,
+        }
+        data = await self._fetch_detail(media_type, tmdb_id)
+        if not data:
+            return _empty
+        media_info = data.get("mediaInfo") or {}
+        result: dict[str, Any] = {
+            "trailer": self.extract_trailer(data),
+            "air_date": self.extract_air_date(data, media_type),
+            "download_progress": parse_download_progress(media_info),
+            "collection_id": None,
+            "collection_name": None,
+            "season_count": None,
+        }
+        # Extract collection info for movies
+        collection = data.get("collection")
+        if isinstance(collection, dict) and collection.get("id"):
+            result["collection_id"] = collection["id"]
+            result["collection_name"] = collection.get("name")
+        # Extract season count for TV
+        if media_type == "tv":
+            seasons = data.get("seasons", [])
+            result["season_count"] = len([s for s in seasons if s.get("seasonNumber", 0) > 0])
+        return result
 
     @staticmethod
-    def _extract_trailer(data: dict) -> str | None:
+    def extract_trailer(data: dict) -> str | None:
         for video in data.get("relatedVideos", []):
             if video.get("site") == "YouTube" and video.get("type") in ("Trailer", "Teaser"):
                 url = video.get("url")
@@ -512,7 +537,7 @@ class SeerrClient:
         return None
 
     @staticmethod
-    def _extract_air_date(data: dict, media_type: str) -> str | None:
+    def extract_air_date(data: dict, media_type: str) -> str | None:
         """Extract air/release date from detail data.
 
         Returns a human-readable string, e.g.:
@@ -544,29 +569,35 @@ class SeerrClient:
             release = data.get("releaseDate", "")
             return release or None
 
-    async def _resolve_detail(self, media_type: str, tmdb_id: int) -> dict:
-        """Resolve title/year/overview/poster for a media item, using the 2-week detail cache."""
-        cache_key = (media_type, tmdb_id)
+    async def _fetch_detail(self, media_type: str, tmdb_id: int) -> dict | None:
+        """Fetch full detail JSON with caching. Returns full API response or None."""
+        cache_key = ("full", media_type, tmdb_id)
         cached = self._detail_cache.get(cache_key)
-        if cached and time.time() - cached["ts"] < self._detail_cache_ttl:
+        if cached and time.time() - cached.get("_cache_ts", 0) < self._detail_cache_ttl:
             return cached
-
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             detail = resp.json()
-            release = detail.get("releaseDate") or detail.get("firstAirDate") or ""
-            year = int(release[:4]) if len(release) >= 4 else None
-            entry = {
-                "title": seerr_title(detail),
-                "year": year,
-                "overview": detail.get("overview") or "",
-                "poster_path": detail.get("posterPath"),
-                "ts": time.time(),
-            }
-            self._detail_cache[cache_key] = entry
-            return entry
+            detail["_cache_ts"] = time.time()
+            self._detail_cache[cache_key] = detail
+            return detail
         except Exception:
+            return None
+
+    async def _resolve_detail(self, media_type: str, tmdb_id: int) -> dict:
+        """Resolve title/year/overview/poster for a media item, using the detail cache."""
+        detail = await self._fetch_detail(media_type, tmdb_id)
+        if not detail:
             return {"title": "Unknown", "year": None, "overview": "", "poster_path": None, "ts": 0}
+        release = detail.get("releaseDate") or detail.get("firstAirDate") or ""
+        year = int(release[:4]) if len(release) >= 4 else None
+        return {
+            "title": seerr_title(detail),
+            "year": year,
+            "overview": detail.get("overview") or "",
+            "poster_path": detail.get("posterPath"),
+            "ts": detail.get("_cache_ts", 0),
+        }
 
     async def get_recently_added(self, take: int = 5) -> list[dict]:
         """Get media recently added to the library with resolved titles (concurrent)."""

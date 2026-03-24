@@ -1,4 +1,5 @@
-.env
+.env*
+!.env.example
 .DS_Store
 __pycache__/
 *.pyc
@@ -7,8 +8,7 @@ dist/
 .venv/
 *.log
 *.log.*
-/BluePopcorn
-BluePopcorn.app/Contents/MacOS/BluePopcorn
-BluePopcorn.app/Contents/_CodeSignature/
+imessage/BluePopcorn.app/Contents/MacOS/BluePopcorn
+imessage/BluePopcorn.app/Contents/_CodeSignature/
 com.bluepopcorn.daemon.plist
 data/

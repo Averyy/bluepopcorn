@@ -28,7 +28,6 @@ from ..prompts import (
 from ..schemas import RESPOND_SCHEMA, TAG_CONTEXT, TAG_MEMORY
 from ..types import Action, HistoryEntry, LLMDecision, SearchResult
 from ..utils import mask_phone
-from ._base import apply_ratings
 
 # Handler imports
 from .search import handle_search
@@ -274,30 +273,8 @@ class ActionExecutor:
         self, results: list[SearchResult], *, enrich_downloads: bool = False
     ) -> None:
         """Fetch trailers, ratings, air dates, and optionally download progress for results."""
-        top = results
-        detail_tasks = [self.seerr.get_detail_extras(r.media_type, r.tmdb_id) for r in top]
-        rating_tasks = [self.seerr.get_ratings(r.media_type, r.tmdb_id) for r in top]
-        n = len(top)
-        all_results = await asyncio.gather(*detail_tasks, *rating_tasks)
-        details = all_results[:n]
-        ratings = all_results[n:n * 2]
-        for i, extras in enumerate(details):
-            if i >= len(results):
-                break
-            if extras.get("trailer"):
-                results[i].trailer_url = extras["trailer"]
-            if extras.get("air_date"):
-                results[i].next_air_date = extras["air_date"]
-            if enrich_downloads and extras.get("download_progress"):
-                results[i].download_progress = extras["download_progress"]
-            if extras.get("collection_id"):
-                results[i].collection_id = extras["collection_id"]
-                results[i].collection_name = extras.get("collection_name")
-            if extras.get("season_count"):
-                results[i].season_count = extras["season_count"]
-        for i, rating_dict in enumerate(ratings):
-            if rating_dict and i < len(results):
-                apply_ratings(results[i], rating_dict)
+        from ..enrich import enrich_results
+        await enrich_results(self.seerr, results, enrich_downloads=enrich_downloads)
 
     async def _execute(
         self, decision: LLMDecision, sender_phone: str, user_text: str = ""

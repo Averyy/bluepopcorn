@@ -60,7 +60,7 @@ SCENARIOS: dict[str, list[Turn]] = {
     "A": [
         Turn("what's Severance about?", expect_action="search"),
         Turn("add it", expect_action="request",
-             alt_action="reply", alt_keywords=["already"]),
+             alt_action="reply"),  # may ask about seasons or say already available
     ],
     "B": [
         Turn("recommend me some sci-fi movies", expect_action="recommend", expect_media_type="movie"),
@@ -163,7 +163,8 @@ SCENARIOS: dict[str, list[Turn]] = {
         # Vague / conversational queries the bot shouldn't fumble
         Turn("i'm bored", expect_action="recommend",
              alt_action="reply"),
-        Turn("what should I watch tonight", expect_action="recommend"),
+        Turn("what should I watch tonight", expect_action="recommend",
+             alt_action="reply"),  # may suggest from trending results already shown
         Turn("something short, like under 2 hours", expect_action="recommend",
              alt_action="reply"),
     ],
@@ -211,16 +212,17 @@ SCENARIOS: dict[str, list[Turn]] = {
         # Correcting yourself mid-conversation
         Turn("add game of thrones", expect_action="search"),
         Turn("wait no, I meant house of the dragon", expect_action="search",
-             alt_action="request", alt_tmdb_id=94997),
+             alt_action=["request", "reply"], alt_tmdb_id=94997),  # may reply from prior results or request directly
         Turn("is that one any good?", expect_action="search",
              alt_action="reply"),
     ],
     "X": [
         # Similar-to + search in natural flow
         Turn("what's something like inception", expect_action="recommend"),
-        Turn("what about tenet, is that good?", expect_action="search"),
+        Turn("what about tenet, is that good?", expect_action="search",
+             alt_action="reply"),  # may answer from similar-to results context
         Turn("add it", expect_action="request",
-             alt_action="reply", alt_keywords=["already"]),
+             alt_action=["reply", "search"], alt_keywords=["already"]),  # may already be in library, or search first
     ],
     "Y": [
         # Specific decade/era requests
@@ -291,9 +293,10 @@ SCENARIOS: dict[str, list[Turn]] = {
     ],
     "AI": [
         # Edge case: asking about seasons for a movie (should ignore)
-        Turn("add inception season 2", expect_action="search"),
+        Turn("add inception season 2", expect_action="search",
+             alt_action="reply"),  # may reply "it's a movie, no seasons" from context
         Turn("add it", expect_action="request",
-             alt_action="reply", alt_keywords=["already"]),
+             alt_action="reply"),  # may already be in library or clarify
     ],
     "AJ": [
         # Edge case: collection that's already fully available

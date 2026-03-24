@@ -2,6 +2,102 @@
 
 from __future__ import annotations
 
+# ── llms.txt (served at GET /llms.txt, no auth) ──────────────────────
+
+LLMS_TXT = """\
+# BluePopcorn MCP
+
+> Seerr media server control: search, discover, request movies and TV shows.
+
+## Tools
+
+- seerr_search: Search movies and TV shows by title
+- seerr_details: Get full details by TMDB ID
+- seerr_request: Request a title for download
+- seerr_recommend: Get recommendations by genre, keyword, or similarity
+- seerr_recent: Show recent library additions and pending requests
+"""
+
+# ── MCP server instructions (sent to MCP clients) ────────────────────
+
+MCP_SERVER_INSTRUCTIONS = """\
+Seerr media server control: search, discover, request movies and TV shows.
+
+Typical workflows:
+- "Add Severance" → seerr_search("Severance") → confirm with user → seerr_request(tmdb_id, media_type)
+- "What's good?" → seerr_recommend(trending=true) or seerr_recommend(genre="thriller")
+- "Tell me about Inception" → seerr_search("Inception") → seerr_details(tmdb_id, media_type)
+- "Show me more" → seerr_recommend with same params + exclude_ids of already-shown tmdb_ids
+
+Tool guidance:
+- seerr_search: primary tool for finding specific titles. Handles year extraction, fuzzy matching, and fallback chains.
+- seerr_recommend: genre/mood/theme browsing. Supports compound queries ("sci-fi comedy"). Use similar_to for "something like X".
+- seerr_details: full info by TMDB ID (ratings, trailers, seasons). Call after search when the user wants more detail.
+- seerr_request: request a title for download. Always search first to get the tmdb_id — do not guess IDs. Always confirm with the user before requesting.
+- seerr_recent: what's been requested or recently added to the library.
+
+Response formats (JSON):
+- seerr_search/seerr_recommend: {results: [{tmdb_id, title, year, media_type, overview, status, ...}], count}
+- seerr_details: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, ...}
+- seerr_request: {requested: true, title, tmdb_id} or {already_exists: true, title, status}
+- seerr_recent: {page, available: [{title, year, media_type, tmdb_id, status}], requested: [...]}\
+"""
+
+# ── MCP tool descriptions ────────────────────────────────────────────
+
+MCP_TOOL_DESC_SEARCH = (
+    "Search for movies and TV shows by title. Handles year extraction "
+    "(e.g. 'Inception 2010'), fuzzy matching, and fallback chains for "
+    "misspelled queries. Returns results with ratings, trailers, and "
+    "availability status. Status values: 'not in the library' (can request), "
+    "'available in library' (already have it), 'partially available' "
+    "(some content available), 'requested: ...' (in progress), "
+    "'currently downloading (X%)' (actively downloading)."
+)
+
+MCP_TOOL_DESC_DETAILS = (
+    "Get full details about a specific movie or TV show by TMDB ID. "
+    "Returns ratings (Rotten Tomatoes, IMDB), trailer URL, availability "
+    "status, download progress, genres, seasons (for TV), and collection info. "
+    "Use after seerr_search when the user wants more info on a specific title."
+)
+
+MCP_TOOL_DESC_REQUEST = (
+    "Request a movie or TV show for download. Use tmdb_id and media_type "
+    "from seerr_search results — always search first, do not guess IDs. "
+    "Checks for duplicates automatically — if already available or "
+    "requested, returns the current status instead. For TV shows, "
+    "auto-fetches all seasons (excluding specials) unless specific "
+    "seasons are provided. Always confirm with the user before calling."
+)
+
+MCP_TOOL_DESC_RECOMMEND = (
+    "Get movie and TV recommendations by genre, keyword, similarity, "
+    "trending, or upcoming. At least one criterion is required. "
+    "Combine fields for precise results (e.g. genre='sci-fi' + keyword='robots')."
+)
+
+MCP_TOOL_DESC_RECENT = (
+    "Show recent media: what's available in the library and what's been "
+    "requested (pending/downloading). Returns titles with status, download "
+    "progress, and dates. Supports pagination."
+)
+
+# ── MCP error messages (returned to MCP clients in tool results) ──────
+
+MCP_ERR_SEERR_UNREACHABLE = "Media server connection failed. Try again shortly."
+MCP_ERR_SEERR_API = "Media server API error. Try again or check server logs."
+MCP_ERR_UNKNOWN_TOOL = "Unknown tool: {name}"
+MCP_ERR_UNEXPECTED = "Unexpected error (check server logs)"
+MCP_ERR_NOT_FOUND = "Title not found: {media_type}/{tmdb_id}"
+MCP_ERR_RECOMMEND_NO_CRITERIA = "Provide at least one of: genre, keyword, similar_to, trending, or upcoming"
+MCP_ERR_RECOMMEND_EMPTY = "No recommendations found for the given criteria"
+MCP_ERR_SIMILAR_NOT_FOUND = "Could not find '{title}' to base recommendations on"
+MCP_ERR_SIMILAR_EMPTY = "No similar titles found for '{title}'"
+MCP_ERR_GENRE_NOT_RECOGNIZED = "Genre '{genre}' not recognized. Available: {available}"
+MCP_ERR_SEASONS_VERIFY_FAILED = "Could not verify seasons — try again"
+MCP_ERR_INVALID_SEASONS = "Invalid seasons {requested}. Available: {available}"
+
 # ── System prompt (sent via --system-prompt on every LLM call) ────────
 
 SYSTEM_PROMPT = """\

@@ -1,9 +1,11 @@
 import Foundation
 
-// Resolve project root from binary location:
-// 4 path components: BluePopcorn → MacOS → Contents → BluePopcorn.app
+// Binary is at: imessage/BluePopcorn.app/Contents/MacOS/BluePopcorn
+// 5 deletingLastPathComponent() calls: binary → MacOS → Contents → BluePopcorn.app → imessage → project root
+// NOTE: After modifying this file, rebuild the binary and re-grant Full Disk Access + Accessibility:
+//   cd imessage && swiftc -o BluePopcorn.app/Contents/MacOS/BluePopcorn wrapper.swift && codesign --force --sign - BluePopcorn.app
 let binary = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
-let projectRoot = binary.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+let projectRoot = binary.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
 let task = Process()
 task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/uv")

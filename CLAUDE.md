@@ -1,6 +1,6 @@
 # BluePopcorn
 
-iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
+Smart Seerr MCP server + iMessage bot. Claude Haiku via `claude -p` for iMessage mode.
 
 ## Critical Rules
 
@@ -12,7 +12,7 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 - **Secrets in `.env` only** -- never hardcode credentials or phone numbers
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
 - **NEVER rebuild wrapper.swift unless its source changes** -- rebuilding revokes FDA/Accessibility permissions. Python code changes only need a daemon restart
-- **After code changes, run `./restart.sh`** -- always restart the daemon after modifying Python code
+- **After code changes, run `imessage/restart.sh`** -- always restart the daemon after modifying Python code
 - **NEVER trigger real Seerr requests when testing** -- CLI tests hit the live API. Only test read-only flows (search, recommend, status, info). Do NOT test "add it", number picking, or any flow that triggers `action=request` / `request_media`. If you need to verify request logic, read the code — don't execute it
 - **After significant changes to prompts, actions, or LLM routing, run the conversation tests** -- `uv run python tests/test_conversations.py -s A,E,I` for a quick smoke test (~5 min), or the full suite for thorough validation. Significant = changes to prompts.py, actions/*.py, llm.py, or _build_prompt
 - **ALL LLM-facing text must live in `prompts.py`** -- system prompt, status labels, context templates, scenario instructions, compression prompts, error messages. Never hardcode prompt strings in handler files. NEVER move LLM-facing text out of prompts.py into other modules to solve import issues — fix the import issue instead
@@ -21,38 +21,57 @@ iMessage bot for Seerr media requests on Mac Mini. Claude Haiku via `claude -p`.
 ## Commands
 
 ```bash
-uv sync                              # Install deps
+uv sync                              # Install deps (MCP server)
+uv sync --extra imessage             # Install deps (iMessage bot)
+
+# MCP server
+uv run -m bluepopcorn.mcp            # HTTP mode (default :8080)
+uv run -m bluepopcorn.mcp --stdio    # stdio mode (local clients)
+
+# iMessage bot
 uv run -m bluepopcorn --cli           # CLI test mode
 uv run -m bluepopcorn --digest        # One-shot digest
 uv run -m bluepopcorn                 # Run daemon
-./restart.sh                          # Restart daemon after Python changes
+imessage/restart.sh                   # Restart daemon after Python changes
 tail -30 bluepopcorn.log              # Recent logs (adjust count as needed)
 
-# Conversation tests (hits real LLM + real Seerr, ~30 min for full suite)
+# Tests
+uv run pytest tests/test_mcp_tools.py -m integration -v  # MCP integration tests
 uv run python tests/test_conversations.py              # Full suite (A-Z)
 uv run python tests/test_conversations.py -s A,E,I     # Smoke test (3 scenarios)
 uv run python tests/test_conversations.py -s X --delay 3  # Single scenario, faster
 
-# Manual restart (restart.sh does this for you)
+# Manual restart (imessage/restart.sh does this for you)
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist   # Stop
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bluepopcorn.daemon.plist # Start
 
 # Rebuild wrapper (ONLY if wrapper.swift or Info.plist change — rare)
 # WARNING: rebuilding revokes FDA/Accessibility, must re-grant in System Settings
+cd imessage
 swiftc -o BluePopcorn.app/Contents/MacOS/BluePopcorn wrapper.swift  # Build macOS wrapper
 codesign --force --sign - BluePopcorn.app                          # Ad-hoc sign
 ```
 
 ## Key References
 
-- prompts.py -- All LLM-facing text (system prompt, status labels, context templates, instructions, error messages)
+- prompts.py -- All LLM-facing text (system prompt, MCP tool descriptions, llms.txt, context templates, instructions, error messages)
 - schemas.py -- All JSON schemas and XML tag constants
 - docs/ref-seerr-api.md -- Seerr API reference (enums, endpoints, params)
-- config.toml -- Non-secret settings
+- imessage/config.toml -- Non-secret settings (iMessage bot)
 
-## Architecture: Two-Call Pattern
+## Architecture
 
-Haiku decides the action (call 1), Python executes the API call, then Haiku crafts the response using conversation history + API results as context (call 2).
+### MCP Server (`bluepopcorn.mcp`)
+
+Stateless MCP server exposing 5 Seerr tools. Runs as HTTP (with Bearer auth) or stdio.
+
+```
+MCP client → HTTP POST /mcp (or stdio) → MCP server → Seerr API → JSON response
+```
+
+### iMessage Bot (`bluepopcorn`)
+
+Two-call pattern: Haiku decides the action (call 1), Python executes the API call, then Haiku crafts the response using conversation history + API results as context (call 2).
 
 ```
 User text → Haiku (action) → Python executes API → store results as context → Haiku (response) → send
@@ -62,14 +81,30 @@ Only exception: bypass commands (status/help/new) use Python responses directly.
 
 ## File Layout
 
-Each external service is its own module:
-
-- `prompts.py` -- All LLM-facing text (system prompt, status labels, context templates, instructions, error messages)
-- `schemas.py` -- All JSON schemas and XML tag constants
-- `seerr.py` -- Seerr API client (search, request, discover, ratings, genres)
-- `morning_digest.py` -- Composes daily digest from seerr data
-- `actions/` -- Action dispatch + handler package (search, request, recent, recommend)
-- Adding a new service = new file + new handler in actions.py
+```
+bluepopcorn/
+  src/bluepopcorn/
+    mcp/                    # MCP server package
+      server.py             # MCP server (5 tools)
+      config.py             # MCP config from env vars
+      http/app.py           # FastAPI HTTP transport + /llms.txt
+      http/middleware.py     # Bearer auth
+    prompts.py              # All LLM-facing text
+    schemas.py              # All JSON schemas
+    seerr.py                # Seerr API client
+    discover.py             # Genre/trend/similar discovery
+    enrich.py               # Ratings/trailer enrichment
+    actions/                # iMessage action handlers
+    ...                     # iMessage bot modules
+  imessage/                 # macOS daemon files
+    wrapper.swift           # Swift wrapper → uv run -m bluepopcorn
+    BluePopcorn.app/        # macOS app bundle
+    config.toml             # Bot settings
+    restart.sh              # Daemon restart
+  tests/
+    test_mcp_tools.py       # MCP integration tests
+    test_conversations.py   # iMessage conversation tests
+```
 
 ## Seerr Integration
 
