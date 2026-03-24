@@ -289,7 +289,7 @@ Note: `/api/v1/blacklist/*` endpoints are deprecated aliases for the above.
 - `downloadStatus` on media items is almost always `[]` -- only populated during an active transfer, empty otherwise.
 - Sonarr lookup returns series metadata (episode counts, monitored) but NOT queue/download progress.
 - There is no `/service/radarr/lookup/{tmdbId}` equivalent (404).
-- To get real download progress (% complete, ETA, queue position), we'd need to hit Radarr (`http://192.168.2.138:7878`) and Sonarr directly, bypassing Seerr. Needs further investigation.
+- To get real download progress (% complete, ETA, queue position), we'd need to hit Radarr and Sonarr directly, bypassing Seerr. Needs further investigation.
 
 ## TMDB Reference Data
 
