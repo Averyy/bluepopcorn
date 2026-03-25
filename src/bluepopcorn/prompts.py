@@ -7,15 +7,33 @@ from __future__ import annotations
 LLMS_TXT = """\
 # BluePopcorn MCP
 
-> Seerr media server control: search, discover, request movies and TV shows.
+Seerr media server control: search, discover, request movies and TV shows.
 
 ## Tools
 
-- seerr_search: Search movies and TV shows by title
-- seerr_details: Get full details by TMDB ID
-- seerr_request: Request a title for download
-- seerr_recommend: Get recommendations by genre, keyword, or similarity
-- seerr_recent: Show recent library additions and pending requests
+seerr_search(query: string, media_type?: "movie"|"tv")
+  Search by title. Fuzzy matching, year extraction, fallback chains.
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, poster_url, tmdb_rating, rt_rating, imdb_rating, trailer_url}], count}
+
+seerr_details(tmdb_id: int, media_type: "movie"|"tv")
+  Full info by TMDB ID. Ratings, trailer, seasons, collection, download progress.
+  Returns: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, download_progress}
+
+seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
+  Request download. Deduplicates. TV auto-fetches all seasons unless specified. Search first — never guess IDs.
+  Returns: {requested: true, title, tmdb_id} | {already_exists: true, title, status}
+
+seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, exclude_ids?: int[])
+  Discover by genre/keyword/similarity/trending. At least one param required. Compound genres work ("sci-fi comedy").
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status}], count}
+
+seerr_recent(page?: int, limit?: int)
+  Recent library additions and pending requests with download progress.
+  Returns: {page, available: [{title, year, media_type, tmdb_id, status}], requested: [...]}
+
+## Status Values
+
+"not in the library" | "available in library" | "partially available" | "requested: pending approval" | "currently downloading (X%)"
 """
 
 # ── MCP server instructions (sent to MCP clients) ────────────────────

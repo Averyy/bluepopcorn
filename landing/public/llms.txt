@@ -1,0 +1,53 @@
+# BluePopcorn
+
+Seerr MCP server + iMessage bot. Controls a Seerr media request manager.
+
+## MCP Tools
+
+seerr_search(query: string, media_type?: "movie"|"tv")
+  Search by title. Fuzzy matching, year extraction ("Inception 2010"), fallback chains.
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, poster_url, tmdb_rating, rt_rating, imdb_rating, trailer_url}], count}
+  Status: "not in the library" | "available in library" | "partially available" | "requested: pending approval" | "currently downloading (X%)"
+
+seerr_details(tmdb_id: int, media_type: "movie"|"tv")
+  Full info by TMDB ID. Ratings, trailer, seasons, collection, download progress.
+  Returns: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, download_progress, collection_id, collection_name}
+
+seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
+  Request download. Deduplicates. TV auto-fetches all seasons unless specified. Search first — never guess IDs.
+  Returns: {requested: true, title, tmdb_id} | {already_exists: true, title, status}
+
+seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, exclude_ids?: int[])
+  Discover by genre/keyword/similarity/trending. At least one param required. Compound genres work ("sci-fi comedy").
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, ...}], count}
+
+seerr_recent(page?: int, limit?: int)
+  Recent library additions and pending requests with download progress.
+  Returns: {page, available: [{title, year, media_type, tmdb_id, status}], requested: [...]}
+
+## Install
+
+MCP (stdio): claude mcp add bluepopcorn -- uv run --directory /path/to/bluepopcorn -m bluepopcorn.mcp --stdio
+MCP (HTTP): uv run -m bluepopcorn.mcp (serves :8080, auth: Bearer MCP_API_KEY)
+iMessage (macOS): uv sync --extra imessage && uv run -m bluepopcorn
+
+## Env
+
+SEERR_URL=http://seerr:5055 (required)
+SEERR_API_KEY=... (required)
+MCP_API_KEY=... (HTTP mode, comma-separated for rotation)
+ANTHROPIC_API_KEY=... (iMessage bot)
+ALLOWED_SENDERS=+1234567890 (iMessage bot, E.164)
+HTTP_PORT=8080
+HTTP_HOST=127.0.0.1
+
+## iMessage Bot
+
+macOS daemon. Monitors iMessage, responds conversationally via Claude Haiku.
+Manages conversation history, personalized suggestions, download notifications.
+Requires Full Disk Access + Accessibility permissions for the wrapper app.
+Config: imessage/config.toml
+
+## Source
+
+https://github.com/Averyy/bluepopcorn

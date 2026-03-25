@@ -1,0 +1,29 @@
+# Vite hashed bundles — immutable forever
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# 3D models — long cache, revalidate on deploy
+/models/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Draco decoder — versioned with Three.js, long cache
+/draco/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Fonts — rarely change
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML — always revalidate
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Machine-readable files — short cache
+/llms.txt
+  Cache-Control: public, max-age=86400
+/.well-known/llms.txt
+  Cache-Control: public, max-age=86400
+/robots.txt
+  Cache-Control: public, max-age=86400
+/sitemap.xml
+  Cache-Control: public, max-age=86400

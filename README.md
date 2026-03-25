@@ -1,13 +1,15 @@
 # BluePopcorn — Seerr Chatbot & MCP Server
 
-Smart media requests for Seerr. MCP server + iMessage chatbot for searching, discovering, and requesting movies and TV shows.
+**[bluepopcorn.dev](https://bluepopcorn.dev)**
+
+Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage.
 
 Unlike raw API wrappers, BluePopcorn handles fuzzy search with fallback chains, automatic year extraction, genre resolution for compound queries ("sci-fi comedy"), duplicate detection, and TV season auto-fetching.
 
 ## Quick Start
 
 ```bash
-git clone <repo>
+git clone https://github.com/Averyy/bluepopcorn.git
 cd bluepopcorn
 cp .env.example .env   # fill in SEERR_URL, SEERR_API_KEY, MCP_API_KEY
 uv sync
@@ -35,18 +37,9 @@ Or in JSON config:
 }
 ```
 
-### Claude Desktop (stdio)
+### Claude Desktop / Windsurf (stdio)
 
-```json
-{
-  "mcpServers": {
-    "bluepopcorn": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/bluepopcorn", "-m", "bluepopcorn.mcp", "--stdio"]
-    }
-  }
-}
-```
+Same JSON config as above in the client's MCP settings file.
 
 ### Claude Desktop (HTTP)
 
@@ -102,6 +95,8 @@ Or in JSON config:
 | `HTTP_PORT` | No | HTTP listen port (default `8080`) |
 | `HTTP_HOST` | No | HTTP listen host (default `127.0.0.1`) |
 | `HTTP_TIMEOUT` | No | Seerr API timeout in seconds (default `15`) |
+| `ANTHROPIC_API_KEY` | iMessage | Claude API key for the iMessage bot |
+| `ALLOWED_SENDERS` | iMessage | E.164 phone numbers allowed to use the bot (comma-separated) |
 
 ## iMessage Bot (optional, macOS only)
 

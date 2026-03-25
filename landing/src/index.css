@@ -1,0 +1,100 @@
+@font-face {
+  font-family: 'Bebas Neue';
+  src: url('/fonts/BebasNeue-Regular-latin-ext.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Bebas Neue';
+  src: url('/fonts/BebasNeue-Regular-latin.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'HT Neon';
+  src: url('/fonts/HT Neon Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  /* Background */
+  --bg: #070B1A;
+  --surface: #0F1525;
+  --border: #1A2340;
+  --surface-warm: #131018;
+
+  /* Neon Blue (Primary) */
+  --neon: #00D4FF;
+  --neon-bright: #4DE8FF;
+  --neon-dim: #0099CC;
+  --neon-glow: rgba(0, 212, 255, 0.4);
+  --neon-wash: rgba(0, 212, 255, 0.06);
+
+  /* Warm Accent */
+  --amber: #FFB800;
+  --amber-bright: #FFD166;
+  --amber-dim: #CC9200;
+  --amber-glow: rgba(255, 184, 0, 0.3);
+
+  /* Text */
+  --text: #E8E4E0;
+  --text-dim: #8A837D;
+  --text-faint: rgba(232, 228, 224, 0.06);
+
+  /* Typography */
+  --heading: 'Bebas Neue', 'Arial Narrow', sans-serif;
+  --sans: 'Geist', 'Inter', sans-serif;
+  --mono: 'Geist Mono', 'SF Mono', monospace;
+
+  font-family: var(--sans);
+  color-scheme: dark;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow-x: hidden;
+  background: var(--bg);
+}
+
+h1, h2, h3 {
+  font-family: var(--heading);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  margin: 0;
+}
+
+code {
+  font-family: var(--mono);
+}

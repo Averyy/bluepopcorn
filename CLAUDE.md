@@ -4,6 +4,8 @@ Smart Seerr MCP server + iMessage bot. Claude Haiku via `claude -p` for iMessage
 
 ## Critical Rules
 
+- **Keep BOTH llms.txt files up to date** -- `src/bluepopcorn/prompts.py` LLMS_TXT is MCP-server-only (tools, params, response formats — served at /llms.txt by the MCP HTTP server). `landing/public/llms.txt` is the full project reference (MCP + iMessage + install + env vars — served by the landing site). When tools, params, or behavior change, update both
+
 - **NEVER give the LLM direct API access** -- structured JSON decisions only, Python executes
 - **ALWAYS use `--tools ""`** with `claude -p` -- disables all built-in tools
 - **NEVER use `--resume`** -- breaks `--json-schema`. Every call is fresh with history packed in

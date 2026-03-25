@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href="https://bluepopcorn.dev/" />
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="LLM Reference" />
+    <link rel="preload" href="/fonts/BebasNeue-Regular-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/models/popcorn_machine_v1.glb" as="fetch" crossorigin />
+    <link rel="preload" href="/fonts/ht-neon-regular.json" as="fetch" crossorigin />
+    <link rel="preload" href="/draco/draco_decoder.wasm" as="fetch" crossorigin />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage." />
+    <meta property="og:title" content="BluePopcorn" />
+    <meta property="og:description" content="Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bluepopcorn.dev/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="BluePopcorn" />
+    <meta name="twitter:description" content="Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage." />
+    <title>BluePopcorn — Smart media requests for Seerr</title>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "BluePopcorn",
+      "description": "Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage.",
+      "url": "https://bluepopcorn.dev",
+      "applicationCategory": "MultimediaApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "codeRepository": "https://github.com/Averyy/bluepopcorn"
+    }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <h1>BluePopcorn — Seerr MCP Server + iMessage Bot</h1>
+      <p>Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage.</p>
+      <h2>Install</h2>
+      <p>MCP Server: <code>claude mcp add bluepopcorn -- uvx bluepopcorn</code></p>
+      <p>iMessage Bot: <code>uv run -m bluepopcorn</code></p>
+      <h2>MCP Tools</h2>
+      <dl>
+        <dt>seerr_search</dt><dd>Search movies and TV shows by title. Handles year extraction, fuzzy matching, and typo correction.</dd>
+        <dt>seerr_recommend</dt><dd>Browse by genre, mood, keyword, or similarity.</dd>
+        <dt>seerr_request</dt><dd>Request a title for download. Deduplicates automatically, fetches all seasons for TV.</dd>
+        <dt>seerr_details</dt><dd>Full info on any title — Rotten Tomatoes, IMDB, trailers, download progress, seasons.</dd>
+        <dt>seerr_recent</dt><dd>Recent additions, pending requests, active downloads.</dd>
+      </dl>
+      <h2>iMessage Bot</h2>
+      <p>Run as a daemon on your Mac. Text it what you want to watch and it handles everything — search, recommendations, downloads, status updates. Works from any iMessage conversation.</p>
+      <p><a href="https://github.com/Averyy/bluepopcorn">GitHub</a></p>
+    </noscript>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
