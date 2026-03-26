@@ -109,7 +109,7 @@ function App() {
       {/* Nav — appears on scroll */}
       <nav className={`nav ${navVisible ? 'nav-visible' : ''}`}>
         <div className="nav-inner">
-          <a href="/" className={`nav-logo neon-text ${navVisible ? 'neon-flicker-on' : ''}`}>BluePopcorn</a>
+          <a href="/" className={`nav-logo neon-text ${navVisible ? 'neon-flicker-on' : ''}`}><img src="/favicon.svg" alt="" width="18" height="18" className="nav-logo-icon" />BluePopcorn</a>
           <div className="nav-links">
             <a href="https://github.com/Averyy/bluepopcorn" target="_blank" rel="noopener noreferrer">GitHub</a>
             <a href="https://github.com/Averyy/bluepopcorn#readme" target="_blank" rel="noopener noreferrer">Docs</a>
@@ -259,6 +259,7 @@ function App() {
 
       {/* ── Footer ── */}
       <footer ref={footerRef} className={`site-footer ${footerVisible ? 'footer-flicker' : ''}`}>
+        <img src="/favicon.svg" alt="BluePopcorn logo" width="32" height="32" className="footer-logo" />
         <div className="footer-neon neon-text">BluePopcorn</div>
         <p className="footer-tagline">MCP server + iMessage bot for Seerr</p>
         <div className="footer-credits">

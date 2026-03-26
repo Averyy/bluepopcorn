@@ -11,6 +11,7 @@ const _scale = new Vector3( 1, 1, 1 );
 const ZERO = new Vector3();
 
 let RAPIER = null;
+let initPromise = null;
 
 function getShape( geometry ) {
 
@@ -81,10 +82,24 @@ function getShape( geometry ) {
 
 async function RapierPhysics() {
 
-	if ( RAPIER === null ) {
+	if ( ! RAPIER ) {
 
-		RAPIER = await import( '@dimforge/rapier3d-compat' );
-		await RAPIER.init();
+		if ( ! initPromise ) {
+
+			initPromise = ( async () => {
+
+				RAPIER = await import( '@dimforge/rapier3d-compat' );
+				// Suppress compat package's own deprecation warning (base64 WASM triggers it)
+				const origWarn = console.warn;
+				console.warn = () => {};
+				await RAPIER.init();
+				console.warn = origWarn;
+
+			} )();
+
+		}
+
+		await initPromise;
 
 	}
 
@@ -256,6 +271,7 @@ async function RapierPhysics() {
 		body.setAngvel( ZERO );
 		body.setLinvel( ZERO );
 		body.setTranslation( position );
+		body.wakeUp();
 
 	}
 
@@ -273,6 +289,7 @@ async function RapierPhysics() {
 		}
 
 		body.setLinvel( velocity );
+		body.wakeUp();
 
 	}
 
@@ -329,31 +346,12 @@ async function RapierPhysics() {
 	// animate
 
 	let disposed = false;
-	let paused = false;
-
-	let stepIntervalId = setInterval( step, 1000 / frameRate );
-
-	function pause() {
-
-		if ( paused ) return;
-		paused = true;
-		clearInterval( stepIntervalId );
-
-	}
-
-	function resume() {
-
-		if ( ! paused ) return;
-		paused = false;
-		timer.update(); // reset delta so first step after resume isn't huge
-		stepIntervalId = setInterval( step, 1000 / frameRate );
-
-	}
 
 	function dispose() {
 
 		disposed = true;
-		clearInterval( stepIntervalId );
+		meshes.length = 0;
+		world.free();
 
 	}
 
@@ -365,8 +363,7 @@ async function RapierPhysics() {
 		removeMesh,
 		setMeshPosition,
 		setMeshVelocity,
-		pause,
-		resume,
+		step,
 		dispose,
 	};
 

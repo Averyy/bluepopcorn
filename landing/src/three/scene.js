@@ -247,7 +247,8 @@ export async function createScene(container) {
       physics.setMeshVelocity(popcorn, spawnVel, index);
     }
   }
-  let spawnInterval = setInterval(spawnFn, 1000 / 30);
+  let lastSpawnTime = 0;
+  const SPAWN_INTERVAL = 1000 / 30;
 
   // ── Neon Sign — bigger ──
   if (neonFont) {
@@ -410,8 +411,15 @@ export async function createScene(container) {
   }
   updateSwayBase();
 
-  function animate() {
-    animationId = requestAnimationFrame(animate);
+  function animate(now) {
+    // Spawn popcorn at ~30Hz inside rAF
+    if (now - lastSpawnTime >= SPAWN_INTERVAL) {
+      lastSpawnTime = now;
+      spawnFn();
+    }
+
+    // Physics step — must be in rAF to avoid concurrent Rapier access
+    physics.step();
 
     // Super slow cinematic sway — continues from where user left off
     if (!isOrbitControlsActive) {
@@ -432,6 +440,9 @@ export async function createScene(container) {
     processInstances();
     controls.update();
     composer.render();
+
+    // Schedule next frame AFTER render — if anything above throws, the loop stops
+    animationId = requestAnimationFrame(animate);
   }
   animate();
 
@@ -453,7 +464,6 @@ export async function createScene(container) {
     renderer.domElement.removeEventListener('pointermove', onPointerMove);
     renderer.domElement.removeEventListener('pointerleave', onPointerLeave);
     cancelAnimationFrame(animationId);
-    clearInterval(spawnInterval);
     physics.dispose();
     controls.dispose();
     // Free GPU resources
@@ -478,16 +488,13 @@ export async function createScene(container) {
     if (paused) return;
     paused = true;
     cancelAnimationFrame(animationId);
-    clearInterval(spawnInterval);
-    physics.pause();
   }
 
   function resume() {
     if (!paused) return;
     paused = false;
-    physics.resume();
+    lastSpawnTime = 0;
     animationId = requestAnimationFrame(animate);
-    spawnInterval = setInterval(spawnFn, 1000 / 30);
   }
 
   return { dispose, pause, resume };

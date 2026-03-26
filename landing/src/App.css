@@ -76,6 +76,9 @@
   pointer-events: auto;
 }
 .nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   font-family: 'HT Neon', var(--heading);
   font-size: 1.3rem;
   letter-spacing: 0.02em;
@@ -646,6 +649,10 @@ pre.install-block {
   padding: 4rem 2rem 2rem;
   border-top: 1px solid var(--border);
   text-align: center;
+}
+.footer-logo {
+  display: block;
+  margin: 0 auto 0.5rem;
 }
 .footer-neon {
   font-family: 'HT Neon', var(--heading);
