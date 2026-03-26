@@ -1,0 +1,16 @@
+export const CHAT_MESSAGES = [
+  { who: 'user', text: 'Add Severance' },
+  { who: 'bot', text: 'Found Severance (2022). 2 seasons, 97% on RT. Want me to request it?' },
+  { who: 'user', text: 'Yeah' },
+  { who: 'bot', text: 'Done — Severance (2022) requested. You\'ll get a notification when it\'s ready.' },
+  { who: 'user', text: 'What\'s good right now?' },
+  { who: 'bot', text: 'Trending this week: The White Lotus (2025), Andor S2, Dune: Prophecy. Want details on any of these?' },
+  { who: 'user', text: 'Tell me about Andor' },
+  { who: 'bot', text: 'Andor (2022). 2 seasons, 96% on RT, 8.4 IMDB. Already in your library — both seasons available.' },
+  { who: 'user', text: 'Something like Dark' },
+  { who: 'bot', text: 'Based on Dark: Devs (2020), Tales from the Loop (2020), Counterpart (2017). Want me to add any?' },
+  { who: 'user', text: 'Add Counterpart' },
+  { who: 'bot', text: 'Counterpart (2017) requested. 2 seasons, downloading now.' },
+  { who: 'user', text: 'What\'s downloading?' },
+  { who: 'bot', text: 'Severance — 42% done. Counterpart — queued, starting shortly.' },
+]

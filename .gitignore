@@ -12,3 +12,4 @@ imessage/BluePopcorn.app/Contents/MacOS/BluePopcorn
 imessage/BluePopcorn.app/Contents/_CodeSignature/
 com.bluepopcorn.daemon.plist
 data/
+!landing/src/data/
