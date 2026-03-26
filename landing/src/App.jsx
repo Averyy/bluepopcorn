@@ -135,16 +135,16 @@ function App() {
                 <div className="ticket-title">Get Started</div>
                 <div className="install-methods">
                   <div className="install-method">
-                    <span className="install-label">MCP Server</span>
-                    <pre className="install-block"><span className="prompt">$</span> <code>claude mcp add bluepopcorn -- uvx bluepopcorn</code></pre>
+                    <span className="install-label">Clone</span>
+                    <pre className="install-block"><span className="prompt">$</span> <code>git clone https://github.com/Averyy/bluepopcorn.git && cd bluepopcorn && uv sync</code></pre>
                   </div>
                   <div className="install-method">
-                    <span className="install-label">iMessage Bot (macOS only)</span>
+                    <span className="install-label">MCP Server (stdio)</span>
+                    <pre className="install-block"><span className="prompt">$</span> <code>claude mcp add bluepopcorn -- uv run -m bluepopcorn.mcp --stdio</code></pre>
+                  </div>
+                  <div className="install-method">
+                    <span className="install-label">iMessage Bot (macOS)</span>
                     <pre className="install-block"><span className="prompt">$</span> <code>uv run -m bluepopcorn</code></pre>
-                  </div>
-                  <div className="install-method">
-                    <span className="install-label">Both (MCP + iMessage)</span>
-                    <pre className="install-block"><span className="prompt">$</span> <code>uv run -m bluepopcorn --mcp --imessage</code></pre>
                   </div>
                 </div>
               </div>
