@@ -6,6 +6,8 @@ Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV
 
 Unlike raw API wrappers, BluePopcorn handles fuzzy search with fallback chains, automatic year extraction, genre resolution for compound queries ("sci-fi comedy"), duplicate detection, and TV season auto-fetching.
 
+The landing page at [bluepopcorn.dev](https://bluepopcorn.dev) is built with React + Three.js and lives in `landing/`.
+
 ## Quick Start
 
 ```bash

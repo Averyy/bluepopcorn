@@ -1,17 +1,16 @@
 # BluePopcorn
 
-Seerr MCP server + iMessage bot. Controls a Seerr media request manager.
+Seerr MCP server + iMessage chatbot. Search, discover, and request movies and TV shows from Claude, ChatGPT, Gemini, or iMessage.
 
 ## MCP Tools
 
 seerr_search(query: string, media_type?: "movie"|"tv")
-  Search by title. Fuzzy matching, year extraction ("Inception 2010"), fallback chains.
+  Search by title. Fuzzy matching, year extraction, fallback chains.
   Returns: {results: [{tmdb_id, title, year, media_type, overview, status, poster_url, tmdb_rating, rt_rating, imdb_rating, trailer_url}], count}
-  Status: "not in the library" | "available in library" | "partially available" | "requested: pending approval" | "currently downloading (X%)"
 
 seerr_details(tmdb_id: int, media_type: "movie"|"tv")
   Full info by TMDB ID. Ratings, trailer, seasons, collection, download progress.
-  Returns: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, download_progress, collection_id, collection_name}
+  Returns: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, download_progress}
 
 seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
   Request download. Deduplicates. TV auto-fetches all seasons unless specified. Search first — never guess IDs.
@@ -19,11 +18,15 @@ seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
 
 seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, exclude_ids?: int[])
   Discover by genre/keyword/similarity/trending. At least one param required. Compound genres work ("sci-fi comedy").
-  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, ...}], count}
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status}], count}
 
 seerr_recent(page?: int, limit?: int)
   Recent library additions and pending requests with download progress.
   Returns: {page, available: [{title, year, media_type, tmdb_id, status}], requested: [...]}
+
+## Status Values
+
+"not in the library" | "available in library" | "partially available" | "requested: pending approval" | "currently downloading (X%)"
 
 ## Install
 
