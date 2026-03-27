@@ -17,6 +17,7 @@ class Config:
     http_port: int = 8080
     http_host: str = "127.0.0.1"
     http_timeout: int = 15
+    min_rating_votes: int = 50
     api_key: str | None = None  # MCP_API_KEY for Bearer auth
 
 
@@ -53,5 +54,6 @@ def load_config() -> Config:
         http_port=http_port,
         http_host=os.environ.get("HTTP_HOST", "127.0.0.1"),
         http_timeout=_int("HTTP_TIMEOUT", 15),
+        min_rating_votes=_int("MIN_RATING_VOTES", 50),
         api_key=os.environ.get("MCP_API_KEY"),
     )

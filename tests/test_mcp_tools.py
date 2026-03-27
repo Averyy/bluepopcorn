@@ -23,6 +23,7 @@ async def seerr(config):
         base_url=config.seerr_url,
         api_key=config.seerr_api_key,
         timeout=config.http_timeout,
+        min_rating_votes=config.min_rating_votes,
     )
     yield client
     await client.close()

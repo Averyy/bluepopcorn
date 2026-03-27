@@ -166,7 +166,7 @@ You respond with a JSON object containing an action and a message. Available act
 - Even if a title was just mentioned in recent results or conversation, you MUST use **search** to look it up if the user asks about it. NEVER use reply to answer questions about a movie or show — you do not have reliable knowledge about titles. Always search.
 - **When someone asks for recommendations, use recommend.** Use the structured fields (`genre`, `keyword`, `year`, `similar_to`, `trending`) to specify what they want. NEVER say "I don't know" or "no idea" — always try recommend first.
 - Use **recommend** for general discovery (trending, genre browsing, "what should I watch"). Use **search** for specific titles ("what's Bugonia about", "add severance").
-- Search results include TMDB ratings (out of 10), YouTube trailer links, and air/release dates. Mention the rating naturally and offer the trailer link if the user seems interested. Only mention air/release dates when the user asked about them or the media isn't out yet — don't volunteer dates for titles already in their library.
+- Search results may include TMDB ratings (out of 10), YouTube trailer links, and air/release dates. Mention the rating naturally if present and offer the trailer link if the user seems interested. If no rating is shown, don't mention one — never guess or make up ratings. Only mention air/release dates when the user asked about them or the media isn't out yet — don't volunteer dates for titles already in their library.
 - **When someone asks when a show or movie airs, releases, or comes out, use search.** Search results include the next air date for TV shows and the release date for movies. If no air date is in the results, say it hasn't been announced yet — don't tell the user to check elsewhere.
 - **Release date expectations:** TV show episodes are typically available on their air date. Movies in theatres won't appear on the media server until they're released digitally or physically — this can be weeks or months after the theatrical release.
 - **Season selection for TV:** When requesting a TV show with multiple seasons, ask which seasons the user wants unless they already specified. If they say "all" or don't care, omit the `seasons` field. If they say "the latest season" or "newest", use the highest season number from the search results. Set `seasons` to an array of season numbers (e.g. `[1, 2]`).
@@ -257,7 +257,7 @@ INSTRUCTION: dict[str, str] = {
         "Do NOT use action=search or action=recommend. The results are already fetched. "
         "Use action=reply to present them. If the user is confirming they want a title, "
         "use action=request with the tmdb_id and media_type from the results. "
-        "One clear match: focus on it — describe, mention ratings, and state its status exactly as shown. "
+        "One clear match: focus on it — describe, mention ratings if present, and state its status exactly as shown. "
         "Multiple plausible matches: number them and ask which one. "
         "Set multiple_results=true when presenting numbered options, false when focusing on one title. "
         "Use the exact status wording from the results."
@@ -275,7 +275,7 @@ INSTRUCTION: dict[str, str] = {
         "in which case use action=request with the tmdb_id and media_type. "
         "Do NOT use action=search or action=recommend. "
         "Set multiple_results=true. Present ALL results as numbered picks — do not skip any. "
-        "Include a brief description and rating for each. "
+        "Include a brief description and rating (if present) for each. "
         "When a result has a status, use the exact status wording from the results "
         "— do not rephrase or interpret it. Ask if they want to add any."
     ),
@@ -295,7 +295,7 @@ INSTRUCTION: dict[str, str] = {
         "Do NOT use action=search or action=recommend. "
         "Set multiple_results=true. Present ALL results as numbered picks "
         "— frame them as similar to the title the user mentioned. "
-        "Include a brief description and rating for each. "
+        "Include a brief description and rating (if present) for each. "
         "Use the exact status wording from the results. "
         "Ask if they want to add any."
     ),

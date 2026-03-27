@@ -31,5 +31,8 @@ quiet_end = "07:00"
 [webhooks]
 port = 8095
 
+[ratings]
+min_rating_votes = 50
+
 [logging]
 level = "INFO"

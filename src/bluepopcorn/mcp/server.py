@@ -269,7 +269,8 @@ def create_server(config: Config, seerr: SeerrClient) -> Server:
                 if ratings.get("imdb_votes"):
                     d["imdb_votes"] = ratings["imdb_votes"]
         vote_avg = detail.get("voteAverage")
-        if vote_avg:
+        vote_count = detail.get("voteCount", 0) or 0
+        if vote_avg and vote_count >= seerr.min_rating_votes:
             d["tmdb_rating"] = round(vote_avg, 1)
 
         # Extras (extracted from the same detail response — no extra API call)
@@ -478,6 +479,7 @@ async def run_stdio_server(config: Config | None = None) -> None:
         base_url=config.seerr_url,
         api_key=config.seerr_api_key,
         timeout=config.http_timeout,
+        min_rating_votes=config.min_rating_votes,
     )
 
     server = create_server(config, seerr)

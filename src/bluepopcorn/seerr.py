@@ -88,15 +88,18 @@ class SeerrClient:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout: int = 15,
+        min_rating_votes: int = 50,
     ) -> None:
         if settings is not None:
             self.base_url = settings.seerr_url.rstrip("/")
             _api_key = settings.seerr_api_key
             _timeout = settings.http_timeout
+            self.min_rating_votes = settings.min_rating_votes
         elif base_url is not None and base_url and api_key is not None and api_key:
             self.base_url = base_url.rstrip("/")
             _api_key = api_key
             _timeout = timeout
+            self.min_rating_votes = min_rating_votes
         else:
             raise ValueError("Provide either settings or base_url + api_key")
         self.client = httpx.AsyncClient(
@@ -779,7 +782,8 @@ class SeerrClient:
             title = seerr_title(item)
 
             vote_avg = item.get("voteAverage")
-            rating = round(vote_avg, 1) if vote_avg else None
+            vote_count = item.get("voteCount", 0) or 0
+            rating = round(vote_avg, 1) if vote_avg and vote_count >= self.min_rating_votes else None
 
             results.append(
                 SearchResult(
@@ -999,7 +1003,7 @@ class SeerrClient:
             data = resp.json()
             batch = self._parse_results(
                 data.get("results", []), take - len(results),
-                filter_lang_year=True, min_votes=10, exclude_ids=exclude_ids,
+                filter_lang_year=True, exclude_ids=exclude_ids,
             )
             results.extend(batch)
             if len(results) >= take or page >= data.get("totalPages", 1):

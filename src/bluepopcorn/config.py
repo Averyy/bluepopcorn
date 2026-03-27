@@ -53,6 +53,9 @@ class Settings:
     webhook_port: int = 8095
     webhook_secret: str = ""
 
+    # Ratings
+    min_rating_votes: int = 50  # TMDB ratings with fewer votes are too volatile to display
+
     # HTTP
     http_timeout: int = 15
 
@@ -98,6 +101,7 @@ def load_settings(
     messages = config.get("messages", {})
     notifications = config.get("notifications", {})
     webhooks = config.get("webhooks", {})
+    ratings = config.get("ratings", {})
     logging_cfg = config.get("logging", {})
 
     # Validate required env vars
@@ -134,6 +138,7 @@ def load_settings(
         quiet_end=notifications.get("quiet_end", "07:00"),
         webhook_port=webhooks.get("port", 8095),
         webhook_secret=env.get("WEBHOOK_SECRET", ""),
+        min_rating_votes=ratings.get("min_rating_votes", 50),
         http_timeout=config.get("http", {}).get("timeout", 15),
         log_level=logging_cfg.get("level", "INFO"),
     )
