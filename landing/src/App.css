@@ -4,7 +4,7 @@
 #scene-container {
   position: relative;
   width: 100%;
-  height: 100vh;
+  height: 90vh;
   z-index: 0;
 }
 #scene-container canvas {
@@ -162,7 +162,7 @@
   top: 0;
   left: 0;
   width: 100%;
-  height: 100vh;
+  height: 90vh;
   z-index: 5;
   display: flex;
   align-items: center;
@@ -183,7 +183,7 @@
   top: 0;
   left: 0;
   width: 100%;
-  height: 100vh;
+  height: 90vh;
   z-index: 10;
   display: flex;
   flex-direction: column;
@@ -466,6 +466,7 @@ pre.install-block {
   color: var(--neon-dim);
   margin-top: 1rem;
 }
+.imessage-phone-mobile { display: none; }
 .imessage-phone {
   background: #1C1C1E;
   border-radius: 28px;
@@ -700,15 +701,40 @@ pre.install-block {
    Responsive
    ═══════════════════════════════════════════ */
 @media (max-width: 640px) {
-  .hero { padding: 0 0 2rem 1.5rem; }
+  /* Hero */
+  #scene-container { height: 66vh; }
+  .hero { height: 66vh; padding: 0 0 6rem 1.5rem; }
   .hero-tagline { font-size: 1.2rem; }
-  .content section { padding: 3rem 1rem; }
-  .marquee-heading { font-size: 1.8rem; }
+
+  /* Brighter text on mobile — dim is unreadable on small screens */
+  :root { --text-dim: #B0AAA4; }
+
+  /* Sections — tighter vertical, more horizontal padding, edge margin */
+  .content section { padding: 1.5rem 1.5rem; margin-left: 0.75rem; margin-right: 0.75rem; margin-bottom: 1rem; }
+
+  /* Headings — readable size */
+  .marquee-heading { font-size: 1.6rem; letter-spacing: 0.04em; overflow-wrap: break-word; word-break: normal; }
+
+  /* Install */
   .ticket-body { padding: 1rem 1.2rem; }
-  .install-block { font-size: 0.75rem; }
+  .install-block { font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; }
+
+  /* Film strip */
   .film-strip { flex-direction: column; }
   .sprockets { display: none; }
-  .workflow { gap: 0.4rem; }
-  .imessage-layout { grid-template-columns: 1fr; }
-  .imessage-phone { max-width: 100%; }
+  .film-frame { padding: 1rem 0.5rem; }
+  .film-frame p { font-size: 1rem; }
+
+  /* Workflow */
+  .workflow-card { padding: 1rem 1.2rem; }
+
+  /* iMessage */
+  .imessage-layout { grid-template-columns: 1fr; gap: 1.5rem; }
+  .imessage-phone-desktop { display: none; }
+  .imessage-phone-mobile { display: block; width: 100%; text-align: center; margin: 0.5rem 0 2rem; }
+  .imessage-phone-mobile .imessage-phone { margin: 0 auto; max-width: 100%; }
+  .imessage-copy { text-align: left; }
+
+  /* Footer */
+  .footer-neon { font-size: 1.5rem; }
 }

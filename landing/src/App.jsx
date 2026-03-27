@@ -220,10 +220,17 @@ function App() {
               </div>
             </Reveal>
             <Reveal delay={0.2}>
-              <IMessageChat />
+              <div className="imessage-phone-desktop">
+                <IMessageChat />
+              </div>
             </Reveal>
           </div>
         </section>
+        <Reveal delay={0.2}>
+          <div className="imessage-phone-mobile">
+            <IMessageChat />
+          </div>
+        </Reveal>
 
         {/* ── How it works ── */}
         <section className="how-section">
