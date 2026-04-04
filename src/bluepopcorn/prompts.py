@@ -199,6 +199,16 @@ You respond with a JSON object containing an action and a message. Available act
 
 ERROR_GENERIC = "Something went wrong, try again in a sec."
 
+# ── Webhook notification templates ───────────────────────────────────
+
+WEBHOOK_MEDIA_APPROVED = "$title has been approved and is being downloaded."
+WEBHOOK_MEDIA_AVAILABLE = "$title is now available to watch!"
+WEBHOOK_MEDIA_FAILED = "There was a problem downloading $title. Try requesting it again later."
+WEBHOOK_MEDIA_PENDING = "New request: $title is pending approval."
+WEBHOOK_FALLBACK = "Update: $subject"
+
+DIGEST_FALLBACK = "Good morning. Couldn't pull together today's update — I'll try again tomorrow."
+
 # ── Compression system prompt ─────────────────────────────────────────
 
 COMPRESSION_SYSTEM_PROMPT = "You are a helpful assistant that summarizes conversations."
@@ -335,12 +345,35 @@ INSTRUCTION: dict[str, str] = {
     ),
 }
 
-# ── Digest templates ──────────────────────────────────────────────────
+# ── Digest (LLM-composed) ─────────────────────────────────────────────
 
-DIGEST_SUGGESTION = (
-    "Suggestion: {title}{year_str} — "
-    "{overview}, {rating}/10 on TMDB. "
-    "Want me to add it?"
+DIGEST_SYSTEM_PROMPT = (
+    "You are a media bot composing a morning digest for an iMessage user. "
+    "Keep it concise and natural. iMessage tone — no emojis, no hype."
+)
+
+DIGEST_COMPOSE_PROMPT = (
+    "Compose a morning digest message.\n\n"
+    "Rules:\n"
+    "- Start with \"Good morning.\"\n"
+    "- Mention recently available titles if any (just names, comma-separated, quote titles with special characters)\n"
+    "- Mention pending request count if any\n"
+    "- Suggest ONE trending title from the candidate pool that fits the user's taste\n"
+    "- Do NOT suggest titles the user has rejected or disliked\n"
+    "- Do NOT suggest genres the user dislikes\n"
+    "- For the suggestion include: title (year) — brief description, rating/10 on TMDB. Ask \"Want me to add it?\"\n"
+    "- If no candidate fits the user's taste, omit the suggestion entirely\n"
+    "- Keep the whole message short — this is a text message, not an email\n"
+    "- A good recommendation that fits the user's taste IS worth sending, "
+    "even if available/pending haven't changed\n"
+    "- Set send=false ONLY when there is truly nothing to offer: "
+    "same available titles as last digest AND no trending candidate fits the user's taste. "
+    "Don't bother the user with a repeat message that has no new info and no good suggestion\n\n"
+    "<memory>\n$memory\n</memory>\n\n"
+    "Recently available: $available\n"
+    "Pending requests: $pending\n"
+    "Last digest sent: $last_digest\n\n"
+    "Trending candidates (not in library — pick one or none):\n$trending"
 )
 
 # ── Compression prompts ──────────────────────────────────────────────

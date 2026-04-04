@@ -51,6 +51,13 @@ Manages conversation history, personalized suggestions, download notifications.
 Requires Full Disk Access + Accessibility permissions for the wrapper app.
 Config: imessage/config.toml
 
+### Morning Digest
+
+Daily digest at configured time (default 8:00 AM), composed per-user by Claude Haiku.
+Includes recently available titles, pending request count, and one trending suggestion
+matched to the user's taste (respects likes/dislikes from conversation memory).
+Tracks suggested IDs to rotate recommendations. Skips sending if nothing new to report.
+
 ## Source
 
 https://github.com/Averyy/bluepopcorn

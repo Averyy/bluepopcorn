@@ -93,6 +93,27 @@ COMPRESSION_SCHEMA = {
     "additionalProperties": False,
 }
 
+DIGEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "send": {
+            "type": "boolean",
+            "description": "true to send, false to skip (nothing new or interesting to report)",
+        },
+        "message": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "The complete digest message to send. Start with 'Good morning.'",
+        },
+        "suggested_tmdb_id": {
+            "type": ["integer", "null"],
+            "description": "TMDB ID of the suggested title, or null if no suggestion",
+        },
+    },
+    "required": ["send", "message", "suggested_tmdb_id"],
+    "additionalProperties": False,
+}
+
 ROLLUP_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": "string"}},

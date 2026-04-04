@@ -38,9 +38,11 @@ imessage/restart.sh                   # Restart daemon after Python changes
 tail -30 bluepopcorn.log              # Recent logs (adjust count as needed)
 
 # Tests
+uv run pytest tests/test_morning_digest.py -v             # Digest unit tests (fast, mocked)
 uv run pytest tests/test_mcp_tools.py -m integration -v  # MCP integration tests
-uv run python tests/test_conversations.py              # Full suite (A-Z)
+uv run python tests/test_conversations.py              # Full suite (A-Z + DIGEST)
 uv run python tests/test_conversations.py -s A,E,I     # Smoke test (3 scenarios)
+uv run python tests/test_conversations.py -s DIGEST    # Digest-only live tests
 uv run python tests/test_conversations.py -s X --delay 3  # Single scenario, faster
 
 # Manual restart (imessage/restart.sh does this for you)
@@ -96,6 +98,8 @@ bluepopcorn/
     seerr.py                # Seerr API client
     discover.py             # Genre/trend/similar discovery
     enrich.py               # Ratings/trailer enrichment
+    morning_digest.py       # LLM-composed daily digest
+    utils.py                # Shared utilities (phone masking, safe paths)
     actions/                # iMessage action handlers
     ...                     # iMessage bot modules
   imessage/                 # macOS daemon files
@@ -104,8 +108,9 @@ bluepopcorn/
     config.toml             # Bot settings
     restart.sh              # Daemon restart
   tests/
+    test_morning_digest.py  # Digest unit tests (mocked, fast)
     test_mcp_tools.py       # MCP integration tests
-    test_conversations.py   # iMessage conversation tests
+    test_conversations.py   # iMessage conversation tests + digest live tests
 ```
 
 ## Seerr Integration

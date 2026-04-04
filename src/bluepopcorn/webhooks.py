@@ -7,7 +7,16 @@ import logging
 from typing import Callable, Coroutine
 from urllib.parse import urlparse
 
+from string import Template
+
 from .config import Settings
+from .prompts import (
+    WEBHOOK_MEDIA_APPROVED,
+    WEBHOOK_MEDIA_AVAILABLE,
+    WEBHOOK_MEDIA_FAILED,
+    WEBHOOK_MEDIA_PENDING,
+    WEBHOOK_FALLBACK,
+)
 from .request_tracker import RequestTracker
 
 log = logging.getLogger(__name__)
@@ -160,17 +169,20 @@ class WebhookServer:
 
         log.info("Webhook received: type=%s, title=%s", notification_type, title)
 
-        # Format notification text (single source of truth per type)
-        if notification_type == "MEDIA_APPROVED":
-            text = f"{title} has been approved and is being downloaded."
-        elif notification_type == "MEDIA_AVAILABLE":
-            text = f"{title} is now available to watch!"
-        elif notification_type == "MEDIA_FAILED":
-            text = f"Failed to download {title}. Someone should check Seerr."
-        elif notification_type == "MEDIA_PENDING":
-            text = f"New request: {title} is pending approval."
+        # Format notification text (templates live in prompts.py)
+        templates = {
+            "MEDIA_APPROVED": WEBHOOK_MEDIA_APPROVED,
+            "MEDIA_AVAILABLE": WEBHOOK_MEDIA_AVAILABLE,
+            "MEDIA_FAILED": WEBHOOK_MEDIA_FAILED,
+            "MEDIA_PENDING": WEBHOOK_MEDIA_PENDING,
+        }
+        template = templates.get(notification_type)
+        if template:
+            text = Template(template).safe_substitute(title=title)
+        elif subject:
+            text = Template(WEBHOOK_FALLBACK).safe_substitute(subject=subject)
         else:
-            text = f"Seerr: {subject}" if subject else None
+            text = None
 
         if not text:
             return

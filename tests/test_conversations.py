@@ -24,6 +24,7 @@ from bluepopcorn.actions import ActionExecutor
 from bluepopcorn.config import load_settings
 from bluepopcorn.llm import LLMClient
 from bluepopcorn.memory import UserMemory
+from bluepopcorn.morning_digest import MorningDigest
 from bluepopcorn.seerr import SeerrClient
 from bluepopcorn.types import LLMDecision
 
@@ -496,9 +497,214 @@ def print_summary(all_results: list[TurnResult]) -> None:
     print("=" * 70)
 
 
+DIGEST_SENDER = "digest-test-user"
+
+
+def _digest_result(
+    num: int, message: str, response: str | None,
+    failures: list[str], duration: float,
+) -> TurnResult:
+    """Helper to build a TurnResult for digest tests."""
+    return TurnResult(
+        scenario="DIGEST", turn_num=num, message=message,
+        expected_action="summarize", actual_action="error" if any("exception" in f for f in failures) else "summarize",
+        actual_media_type=None, response=response or "(None)",
+        passed=not failures, failures=failures, duration=duration,
+    )
+
+
+async def _run_digest_case(
+    num: int, label: str, digest: MorningDigest, sender: str,
+    last_digest: str | None = None,
+    available: str | None = None, pending: str | None = None,
+    trending: str | None = None,
+    *,
+    verbose: bool = False,
+    expect_send: bool | None = None,
+    reject_keywords: list[str] | None = None,
+) -> tuple[TurnResult, str | None]:
+    """Run a single digest test case and return (result, digest_text)."""
+    print(f"  [D.{num}] {label}...")
+    start = time.monotonic()
+    try:
+        text = await digest.build(
+            sender, last_digest=last_digest,
+            available=available, pending=pending, trending=trending,
+        )
+        elapsed = time.monotonic() - start
+
+        failures: list[str] = []
+
+        if expect_send is True and text is None:
+            failures.append("expected digest to send, but got None (skip)")
+        elif expect_send is False and text is not None:
+            failures.append(f"expected digest to skip, but got: {text[:80]!r}")
+
+        if text is not None:
+            if not text.lower().startswith("good morning"):
+                failures.append(f"expected 'Good morning' prefix, got: {text[:50]!r}")
+            for kw in (reject_keywords or []):
+                if kw.lower() in text.lower():
+                    failures.append(f"digest contains rejected keyword: {kw!r}")
+            if verbose:
+                print(f"    → {text}")
+        else:
+            if verbose:
+                print("    → (skipped)")
+
+        status = "PASS" if not failures else "FAIL"
+        print(f"  [D.{num}] {status} | {label} | {elapsed:.1f}s")
+        for f in failures:
+            print(f"         ^ {f}")
+        return _digest_result(num, label, text, failures, elapsed), text
+
+    except Exception as e:
+        elapsed = time.monotonic() - start
+        print(f"  [D.{num}] FAIL | {label} | exception: {e}")
+        return _digest_result(num, label, f"[ERROR: {e}]", [f"exception: {e}"], elapsed), None
+
+
+async def run_digest_tests(
+    settings: Any,
+    seerr: SeerrClient,
+    llm: LLMClient,
+    memory: UserMemory,
+    verbose: bool,
+) -> list[TurnResult]:
+    """Run digest-specific tests against the live LLM.
+
+    The digest is a separate code path from conversations — it calls
+    LLMClient.summarize() (not decide/respond), so it needs its own tests.
+    """
+    results: list[TurnResult] = []
+
+    digest = MorningDigest(settings, seerr, llm, memory)
+
+    # Set up test user memory with known dislikes
+    memory.load_or_create(DIGEST_SENDER)
+    sections = memory.parse_sections(memory.load(DIGEST_SENDER))
+    sections["Dislikes"] = [
+        "Genres: horror [test user hates horror]",
+        "Titles: Bloodhounds (2023) [test rejection]",
+    ]
+    sections["Likes"] = [
+        "Genres: sci-fi, comedy",
+    ]
+    memory.save(DIGEST_SENDER, sections)
+
+    # Fetch real data from Seerr once for reuse
+    real_available = await digest.fetch_available()
+    real_pending = await digest.fetch_pending()
+    real_trending = await digest.fetch_trending()
+
+    print("\n--- Digest Tests ---")
+
+    # ── D.1: Fresh digest with real data → should send ────────────
+    r, text1 = await _run_digest_case(
+        1, "Fresh digest with real data",
+        digest, DIGEST_SENDER,
+        available=real_available, pending=real_pending, trending=real_trending,
+        verbose=verbose, expect_send=True,
+    )
+    results.append(r)
+
+    # ── D.2: Dislikes respected — Bloodhounds should NOT appear ───
+    r, text2 = await _run_digest_case(
+        2, "Dislikes respected (Bloodhounds rejected)",
+        digest, DIGEST_SENDER,
+        available=real_available, pending=real_pending, trending=real_trending,
+        verbose=verbose, reject_keywords=["Bloodhounds"],
+    )
+    results.append(r)
+
+    # ── D.3: Same data + last_digest → should skip or rotate ──────
+    r, text3 = await _run_digest_case(
+        3, "Repeat with same data (should skip or rotate)",
+        digest, DIGEST_SENDER,
+        last_digest=text1 or text2,
+        available=real_available, pending=real_pending, trending=real_trending,
+        verbose=verbose,
+    )
+    # Extra check: if it did send, it shouldn't be identical
+    if text3 is not None and text3 == (text1 or text2):
+        r = _digest_result(3, r.message, text3,
+                           ["sent identical message (should differ or skip)"], r.duration)
+    results.append(r)
+
+    # ── D.4: Nothing new available, no pending, but trending → ────
+    # LLM sends if a trending title fits user's taste, skips if none match.
+    # Can't control what's trending on Seerr, so both outcomes are valid.
+    r, text4 = await _run_digest_case(
+        4, "No available/pending, only trending → send if good match",
+        digest, DIGEST_SENDER,
+        available="(none)", pending="0", trending=real_trending,
+        verbose=verbose,
+    )
+    results.append(r)
+
+    # ── D.5: Nothing new AND last_digest had same available → skip ─
+    # Simulates: same available titles as yesterday, nothing to add
+    r, text5 = await _run_digest_case(
+        5, "Same available as last digest, no change → skip",
+        digest, DIGEST_SENDER,
+        last_digest=f"Good morning. Recently available: {real_available}.",
+        available=real_available, pending=real_pending, trending=real_trending,
+        verbose=verbose,
+        # LLM should skip (send=false) since available unchanged.
+        # But if it finds a new suggestion, it may still send — that's OK.
+    )
+    results.append(r)
+
+    # ── D.6: Nothing at all (no available, no pending, no trending) ─
+    # Trending is explicitly set to None so the LLM sees "(nothing trending)"
+    r, text6 = await _run_digest_case(
+        6, "No available, no pending, no trending → skip",
+        digest, DIGEST_SENDER,
+        available="(none)", pending="0", trending="(nothing trending right now)",
+        last_digest="Good morning. Nothing to report.",
+        verbose=verbose,
+        expect_send=False,
+    )
+    results.append(r)
+
+    # ── D.7: Suggested ID rotation check ──────────────────────────
+    print("  [D.7] Verifying suggested IDs were tracked...")
+    start = time.monotonic()
+    ids = digest._load_suggested_ids(DIGEST_SENDER)
+    elapsed = time.monotonic() - start
+    failures: list[str] = []
+    # At least one digest with a suggestion should have been sent (D.1 or D.2),
+    # so we expect at least one tracked ID. If zero, the rotation feature is broken.
+    sent_count = sum(1 for r in results if r.passed and r.response != "(None)")
+    if sent_count > 0 and len(ids) == 0:
+        failures.append("digests were sent but no suggested IDs tracked — rotation may be broken")
+    status = "PASS" if not failures else "FAIL"
+    print(f"  [D.7] {status} | suggested ID rotation ({len(ids)} IDs) | {elapsed:.1f}s")
+    for f in failures:
+        print(f"         ^ {f}")
+    results.append(TurnResult(
+        scenario="DIGEST", turn_num=7, message="suggested ID rotation",
+        expected_action="check", actual_action="check",
+        actual_media_type=None, response=f"{len(ids)} IDs tracked",
+        passed=not failures, failures=failures, duration=elapsed,
+    ))
+
+    # Clean up test data files
+    import os
+    for prefix in ("suggested_ids", "last_digest"):
+        path = digest._data_dir / f"{prefix}_digest-test-user"
+        if path.exists():
+            os.remove(path)
+    mem_path = memory._path(DIGEST_SENDER)
+    if mem_path.exists():
+        os.remove(mem_path)
+
+    return results
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="BluePopcorn conversation tests")
-    parser.add_argument("--scenario", "-s", help="Run only this scenario (A-L)")
+    parser.add_argument("--scenario", "-s", help="Run only this scenario (A-AJ, DIGEST)")
     parser.add_argument("--delay", "-d", type=float, default=10, help="Seconds between turns (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show extra detail")
     parser.add_argument("--live", action="store_true", help="Actually submit requests to Seerr (default: dry run)")
@@ -535,14 +741,19 @@ async def main() -> None:
     capture.install()
 
     # Pick scenarios
+    run_digest = False
     if args.scenario:
         names = [s.upper() for s in args.scenario.split(",")]
-        scenarios = {n: SCENARIOS[n] for n in names if n in SCENARIOS}
-        if not scenarios:
-            print(f"Unknown scenario(s): {args.scenario}. Available: {', '.join(SCENARIOS)}")
+        run_digest = "DIGEST" in names
+        conv_names = [n for n in names if n != "DIGEST"]
+        scenarios = {n: SCENARIOS[n] for n in conv_names if n in SCENARIOS}
+        if not scenarios and not run_digest:
+            all_names = ", ".join(list(SCENARIOS.keys()) + ["DIGEST"])
+            print(f"Unknown scenario(s): {args.scenario}. Available: {all_names}")
             sys.exit(1)
     else:
         scenarios = SCENARIOS
+        run_digest = True
 
     all_results: list[TurnResult] = []
 
@@ -550,6 +761,10 @@ async def main() -> None:
         print(f"\n--- Scenario {name} ({len(turns)} turns) ---")
         results = await run_scenario(name, turns, executor, capture, args.delay, args.verbose)
         all_results.extend(results)
+
+    if run_digest:
+        digest_results = await run_digest_tests(settings, seerr, llm, memory, args.verbose)
+        all_results.extend(digest_results)
 
     print_summary(all_results)
 

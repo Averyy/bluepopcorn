@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,7 +25,7 @@ from .sender import MessageSender
 from .types import IncomingMessage
 from .prompts import ERROR_GENERIC
 from .request_tracker import RequestTracker
-from .utils import mask_phone
+from .utils import mask_phone, safe_data_path
 from .watcher import ChatDBWatcher
 from .webhooks import WebhookServer
 
@@ -85,19 +86,87 @@ def setup_logging(level: str, log_path: str = "bluepopcorn.log") -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def _load_last_digest(data_dir: Path, sender: str) -> str | None:
+    """Read the last digest text sent to this user."""
+    path = safe_data_path(data_dir, "last_digest", sender)
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+
+
+def _save_last_digest(data_dir: Path, sender: str, text: str) -> None:
+    """Persist the digest text for dedup on next run."""
+    path = safe_data_path(data_dir, "last_digest", sender)
+    # Strip angle brackets — this text is re-injected into the next prompt
+    sanitized = text.replace("<", "").replace(">", "")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(sanitized)
+        tmp.chmod(0o600)
+        tmp.rename(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+async def _send_digest_to_all(
+    settings: Settings,
+    digest: MorningDigest,
+    data_dir: Path,
+    msg_sender: MessageSender,
+    *,
+    on_skip: Callable[[str], None],
+    on_send: Callable[[str, str], None],
+    on_error: Callable[[str, Exception], None],
+) -> None:
+    """Fetch data and send per-user digests to all allowed senders.
+
+    Shared between the one-shot CLI (``run_digest``) and the daemon
+    scheduler (``_schedule_digest``).  Callers provide callbacks for
+    skip / send / error reporting so each site can log in its own style.
+    """
+    available, pending = await asyncio.gather(
+        digest.fetch_available(),
+        digest.fetch_pending(),
+    )
+
+    for phone in settings.allowed_senders:
+        try:
+            last = _load_last_digest(data_dir, phone)
+            text = await digest.build(
+                sender=phone, last_digest=last,
+                available=available, pending=pending,
+            )
+            if text is None:
+                on_skip(phone)
+                continue
+            await msg_sender.send_text(phone, text)
+            _save_last_digest(data_dir, phone, text)
+            on_send(phone, text)
+        except Exception as e:
+            on_error(phone, e)
+
+
 async def run_digest(settings: Settings) -> None:
     """One-shot digest: print and optionally send."""
     seerr = SeerrClient(settings)
-    digest = MorningDigest(settings, seerr)
-    text = await digest.build()
-    print(text)
+    llm = LLMClient(settings)
+    memory = UserMemory(settings)
+    data_dir = settings.resolve_path(settings.data_dir)
+    msg_sender = MessageSender(settings)
 
-    # Also send to all allowed senders if running as daemon
-    sender = MessageSender(settings)
-    for phone in settings.allowed_senders:
-        await sender.send_text(phone, text)
-
-    await seerr.close()
+    try:
+        digest = MorningDigest(settings, seerr, llm, memory)
+        await _send_digest_to_all(
+            settings, digest, data_dir, msg_sender,
+            on_skip=lambda ph: print(f"[{mask_phone(ph)}] Skipped — nothing new to report"),
+            on_send=lambda ph, t: print(f"[{mask_phone(ph)}] {t}"),
+            on_error=lambda ph, e: print(f"[{mask_phone(ph)}] Digest failed: {e}"),
+        )
+    finally:
+        await seerr.close()
 
 
 async def run_daemon(settings: Settings) -> None:
@@ -165,7 +234,7 @@ async def run_daemon(settings: Settings) -> None:
     # Digest + compression scheduler
     compressor = Compressor(settings, llm, monitor, memory)
     digest_task = asyncio.create_task(
-        _schedule_digest(settings, seerr, sender, compressor)
+        _schedule_digest(settings, seerr, llm, memory, sender, compressor)
     )
 
     # Shutdown event
@@ -328,11 +397,14 @@ def _is_quiet_hours(settings: Settings) -> bool:
 async def _schedule_digest(
     settings: Settings,
     seerr: SeerrClient,
+    llm: LLMClient,
+    memory: UserMemory,
     msg_sender: MessageSender,
     compressor: Compressor,
 ) -> None:
     """Schedule daily morning digest + memory compression."""
     tz = ZoneInfo(settings.timezone)
+    data_dir = settings.resolve_path(settings.data_dir)
 
     hour, minute = map(int, settings.digest_time.split(":"))
 
@@ -348,13 +420,15 @@ async def _schedule_digest(
         await asyncio.sleep(wait_seconds)
 
         try:
-            digest = MorningDigest(settings, seerr)
-            text = await digest.build()
-            log.info("Digest: %s", text)
-            for phone in settings.allowed_senders:
-                await msg_sender.send_text(phone, text)
+            digest = MorningDigest(settings, seerr, llm, memory)
+            await _send_digest_to_all(
+                settings, digest, data_dir, msg_sender,
+                on_skip=lambda ph: log.info("Digest skipped for %s (nothing new)", mask_phone(ph)),
+                on_send=lambda ph, t: log.info("Digest sent to %s: %s", mask_phone(ph), t[:80]),
+                on_error=lambda ph, e: log.error("Digest failed for %s: %s", mask_phone(ph), e),
+            )
         except Exception as e:
-            log.error("Digest failed: %s", e)
+            log.error("Digest fetch failed: %s", e)
 
         # Run compression after digest for each allowed sender
         for phone in settings.allowed_senders:

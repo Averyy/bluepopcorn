@@ -19,7 +19,7 @@ from .llm import LLMClient
 from .memory import UserMemory
 from .monitor import MessageMonitor
 from .prompts import COMPRESS_DAILY_PROMPT, COMPRESS_MONTHLY_PROMPT, COMPRESS_WEEKLY_PROMPT
-from .utils import mask_phone
+from .utils import mask_phone, safe_data_path
 from .schemas import COMPRESSION_SCHEMA, ROLLUP_SCHEMA
 from .types import HistoryEntry
 
@@ -42,11 +42,7 @@ class Compressor:
 
     def _last_compressed_path(self, sender: str) -> Path:
         """Per-sender last-compressed date file."""
-        safe = sender.lstrip("+").replace("/", "_")
-        path = self._data_dir / f"last_compressed_{safe}"
-        if not path.resolve().is_relative_to(self._data_dir.resolve()):
-            raise ValueError(f"Invalid sender for compression path: {sender!r}")
-        return path
+        return safe_data_path(self._data_dir, "last_compressed", sender)
 
     def _read_last_compressed(self, sender: str) -> datetime.date | None:
         """Read the last compression date for a sender."""
