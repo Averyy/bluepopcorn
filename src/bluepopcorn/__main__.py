@@ -17,13 +17,13 @@ from .compression import Compressor
 from .config import Settings, load_settings
 from .memory import UserMemory
 from .morning_digest import MorningDigest
-from .llm import LLMClient
+from .llm import LLMAuthError, LLMClient
 from .monitor import MessageMonitor
 from .posters import PosterHandler
 from .seerr import SeerrClient
 from .sender import MessageSender
 from .types import IncomingMessage
-from .prompts import ERROR_GENERIC
+from .prompts import ERROR_AUTH, ERROR_GENERIC
 from .request_tracker import RequestTracker
 from .utils import mask_phone, safe_data_path
 from .watcher import ChatDBWatcher
@@ -167,6 +167,7 @@ async def run_digest(settings: Settings) -> None:
         )
     finally:
         await seerr.close()
+        await llm.close()
 
 
 async def run_daemon(settings: Settings) -> None:
@@ -319,6 +320,7 @@ async def run_daemon(settings: Settings) -> None:
         await monitor.close()
         await seerr.close()
         await posters.close()
+        await llm.close()
         log.info("Shutdown complete")
 
 
@@ -344,6 +346,13 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
             await sender.stop_typing()
             log.info("OUT %s: %s", mask_phone(msg.sender), response[:200])
             await sender.send_text(msg.sender, response)
+        except LLMAuthError as e:
+            log.error("Auth error for %s: %s", mask_phone(msg.sender), e)
+            await sender.stop_typing()
+            try:
+                await sender.send_text(msg.sender, ERROR_AUTH)
+            except Exception:
+                log.error("Failed to send auth error to %s", mask_phone(msg.sender))
         except Exception as e:
             log.error("Error processing message from %s: %s", mask_phone(msg.sender), e)
             await sender.stop_typing()

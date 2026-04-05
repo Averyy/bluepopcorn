@@ -47,6 +47,8 @@ HTTP_HOST=127.0.0.1
 ## iMessage Bot
 
 macOS daemon. Monitors iMessage, responds conversationally via Claude Haiku.
+LLM calls use Anthropic SDK directly (ANTHROPIC_API_KEY) for production.
+Falls back to `claude -p` subprocess without API key (testing only, requires daily manual login).
 Manages conversation history, personalized suggestions, download notifications.
 Requires Full Disk Access + Accessibility permissions for the wrapper app.
 Config: imessage/config.toml

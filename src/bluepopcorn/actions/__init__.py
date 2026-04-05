@@ -9,7 +9,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
-from ..llm import LLMClient
+from ..llm import LLMAuthError, LLMClient
 from ..memory import UserMemory
 from ..monitor import MessageMonitor
 from ..posters import PosterHandler
@@ -20,6 +20,7 @@ from ..prompts import (
     CONTEXT_EMPTY_REPLY,
     CONVERSATION_GAP,
     CURRENT_MESSAGE_DELIMITER,
+    ERROR_AUTH,
     ERROR_GENERIC,
     INSTRUCTION,
     LAST_DISCUSSED_TITLE,
@@ -145,6 +146,11 @@ class ActionExecutor:
         try:
             decision, meta = await self.llm.decide(prompt)
             log.info("LLM action=%s query=%s tmdb_id=%s", decision.action.value, decision.query or "-", decision.tmdb_id or "-")
+        except LLMAuthError as e:
+            log.error("LLM auth failed: %s", e)
+            self._prompt_cache.pop(sender_phone, None)
+            self._prompt_cache_ctx_count.pop(sender_phone, None)
+            return ERROR_AUTH
         except Exception as e:
             log.error("LLM call failed: %s", e)
             self._prompt_cache.pop(sender_phone, None)
@@ -199,6 +205,9 @@ class ActionExecutor:
                 decision.action.value, (decision.message or "")[:100],
             )
             return ERROR_GENERIC, False
+        except LLMAuthError as e:
+            log.error("LLM response auth failed: %s", e)
+            return ERROR_AUTH, False
         except Exception as e:
             log.error("LLM response call failed: %s", e)
             return ERROR_GENERIC, False

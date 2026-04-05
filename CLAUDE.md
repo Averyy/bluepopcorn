@@ -1,15 +1,16 @@
 # BluePopcorn
 
-Smart Seerr MCP server + iMessage bot. Claude Haiku via `claude -p` for iMessage mode.
+Smart Seerr MCP server + iMessage bot. Claude Haiku via Anthropic SDK (API key) for iMessage mode, with `claude -p` subprocess as testing fallback.
 
 ## Critical Rules
 
 - **Keep BOTH llms.txt files up to date** -- `src/bluepopcorn/prompts.py` LLMS_TXT is MCP-server-only (tools, params, response formats — served at /llms.txt by the MCP HTTP server). `landing/public/llms.txt` is the full project reference (MCP + iMessage + install + env vars — served by the landing site). When tools, params, or behavior change, update both
 
 - **NEVER give the LLM direct API access** -- structured JSON decisions only, Python executes
-- **ALWAYS use `--tools ""`** with `claude -p` -- disables all built-in tools
-- **NEVER use `--resume`** -- breaks `--json-schema`. Every call is fresh with history packed in
-- **`--append-system-prompt-file` does NOT exist** -- only `--append-system-prompt` (inline string)
+- **LLM calls use Anthropic SDK (primary) or `claude -p` subprocess (fallback)** -- SDK uses tool_use for structured output (output_config's grammar compiler times out on complex schemas). Subprocess path is testing-only, requires daily manual OAuth login
+- **ALWAYS use `--tools ""`** with `claude -p` -- disables all built-in tools (subprocess fallback only)
+- **NEVER use `--resume`** -- breaks `--json-schema`. Every call is fresh with history packed in (subprocess fallback only)
+- **`--append-system-prompt-file` does NOT exist** -- only `--append-system-prompt` (inline string) (subprocess fallback only)
 - **Poster images must be in `~/Pictures/bluepopcorn/`** -- Messages.app sandbox, other dirs silently fail
 - **Secrets in `.env` only** -- never hardcode credentials or phone numbers
 - **NEVER disable the typing indicator** -- essential UX. Fix bugs instead
@@ -81,6 +82,8 @@ Two-call pattern: Haiku decides the action (call 1), Python executes the API cal
 User text → Haiku (action) → Python executes API → store results as context → Haiku (response) → send
 ```
 
+LLM calls use the Anthropic SDK directly when `ANTHROPIC_API_KEY` is set (production), or fall back to `claude -p` subprocess (testing only — requires daily manual OAuth login). The SDK path uses tool_use for structured output enforcement. Custom exception `LLMAuthError` propagates auth failures distinctly from transient errors.
+
 Only exception: bypass commands (status/help/new) use Python responses directly.
 
 ## File Layout
@@ -93,6 +96,7 @@ bluepopcorn/
       config.py             # MCP config from env vars
       http/app.py           # FastAPI HTTP transport + /llms.txt
       http/middleware.py     # Bearer auth
+    llm.py                  # LLM client (SDK primary, subprocess fallback)
     prompts.py              # All LLM-facing text
     schemas.py              # All JSON schemas
     seerr.py                # Seerr API client
@@ -118,7 +122,7 @@ bluepopcorn/
 - Auth: `X-Api-Key` header (set on httpx client from `SEERR_API_KEY` env var)
 - URL encoding: must use `%20` not `+` for spaces (Seerr 3.x rejects `+`)
 - Genres: loaded dynamically from `/api/v1/genres/movie` and `/api/v1/genres/tv`, cached
-- Custom exceptions: `SeerrConnectionError`, `SeerrSearchError`
+- Custom exceptions: `SeerrConnectionError`, `SeerrSearchError`, `LLMAuthError`
 - Request dedup: checks media status before POSTing to avoid duplicates
 - MediaStatus enum: NOT_TRACKED=0, UNKNOWN=1, PENDING=2, PROCESSING=3, PARTIALLY_AVAILABLE=4, AVAILABLE=5, BLOCKLISTED=6, DELETED=7
 - RequestStatus enum: PENDING_APPROVAL=1, APPROVED=2, DECLINED=3, FAILED=4, COMPLETED=5
@@ -126,6 +130,7 @@ bluepopcorn/
 ## Conventions
 
 - Package manager: `uv` (never pip), all Python via `uv run`
+- Anthropic SDK (`anthropic.AsyncAnthropic`) for LLM calls, tool_use for structured output
 - httpx for API requests (Seerr)
 - aiosqlite for chat.db (read-only `?mode=ro`)
 - AppleScript: `account`/`participant` pattern (Tahoe 26+), not old `service`/`buddy`

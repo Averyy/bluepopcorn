@@ -97,12 +97,12 @@ Same JSON config as above in the client's MCP settings file.
 | `HTTP_PORT` | No | HTTP listen port (default `8080`) |
 | `HTTP_HOST` | No | HTTP listen host (default `127.0.0.1`) |
 | `HTTP_TIMEOUT` | No | Seerr API timeout in seconds (default `15`) |
-| `ANTHROPIC_API_KEY` | iMessage | Claude API key for the iMessage bot |
+| `ANTHROPIC_API_KEY` | iMessage | Anthropic API key for the iMessage bot (required for production; without it, falls back to Claude Code CLI which requires daily manual login) |
 | `ALLOWED_SENDERS` | iMessage | E.164 phone numbers allowed to use the bot (comma-separated) |
 
 ## iMessage Bot (optional, macOS only)
 
-BluePopcorn also includes an iMessage bot that runs as a macOS daemon. This is separate from the MCP server.
+BluePopcorn also includes an iMessage bot that runs as a macOS daemon. This is separate from the MCP server. LLM calls use the Anthropic SDK directly (fast, reliable, no token expiration) when `ANTHROPIC_API_KEY` is set. Without it, falls back to `claude -p` subprocess which requires daily manual OAuth login — only suitable for testing.
 
 ```bash
 uv sync --extra imessage

@@ -198,6 +198,7 @@ You respond with a JSON object containing an action and a message. Available act
 # ── Error message ─────────────────────────────────────────────────────
 
 ERROR_GENERIC = "Something went wrong, try again in a sec."
+ERROR_AUTH = "I'm offline — my API key needs to be set up. Let the admin know."
 
 # ── Webhook notification templates ───────────────────────────────────
 
@@ -208,6 +209,7 @@ WEBHOOK_MEDIA_PENDING = "New request: $title is pending approval."
 WEBHOOK_FALLBACK = "Update: $subject"
 
 DIGEST_FALLBACK = "Good morning. Couldn't pull together today's update — I'll try again tomorrow."
+DIGEST_AUTH_FALLBACK = "Good morning. I'm having trouble connecting — the API key may need updating."
 
 # ── Compression system prompt ─────────────────────────────────────────
 

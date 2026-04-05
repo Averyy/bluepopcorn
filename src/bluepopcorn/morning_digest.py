@@ -10,7 +10,8 @@ if TYPE_CHECKING:
     from .memory import UserMemory
 
 from .config import Settings
-from .prompts import DIGEST_COMPOSE_PROMPT, DIGEST_FALLBACK, DIGEST_SYSTEM_PROMPT
+from .llm import LLMAuthError
+from .prompts import DIGEST_AUTH_FALLBACK, DIGEST_COMPOSE_PROMPT, DIGEST_FALLBACK, DIGEST_SYSTEM_PROMPT
 from .schemas import DIGEST_SCHEMA
 from .seerr import SeerrClient
 from .types import MediaStatus
@@ -78,6 +79,9 @@ class MorningDigest:
                 prompt, DIGEST_SCHEMA,
                 system_prompt=DIGEST_SYSTEM_PROMPT,
             )
+        except LLMAuthError as e:
+            log.error("Digest auth failed: %s", e)
+            return DIGEST_AUTH_FALLBACK
         except Exception as e:
             log.error("Digest LLM call failed, sending fallback: %s", e)
             return DIGEST_FALLBACK

@@ -19,6 +19,7 @@ class Settings:
     allowed_senders: list[str]
 
     # LLM
+    anthropic_api_key: str = ""
     model: str = "haiku"
     fallback_model: str = "sonnet"
     llm_timeout: int = 30
@@ -119,6 +120,7 @@ def load_settings(
         seerr_url=seerr_url,
         seerr_api_key=seerr_api_key,
         allowed_senders=allowed_senders,
+        anthropic_api_key=env.get("ANTHROPIC_API_KEY", ""),
         model=llm.get("model", "haiku"),
         fallback_model=llm.get("fallback_model", "sonnet"),
         llm_timeout=llm.get("timeout", 30),

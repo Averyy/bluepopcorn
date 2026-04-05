@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .llm import LLMClient
+from .llm import LLMAuthError, LLMClient
 from .memory import UserMemory
 from .monitor import MessageMonitor
 from .prompts import COMPRESS_DAILY_PROMPT, COMPRESS_MONTHLY_PROMPT, COMPRESS_WEEKLY_PROMPT
@@ -115,6 +115,9 @@ class Compressor:
 
         try:
             result = await self.llm.summarize(prompt, COMPRESSION_SCHEMA)
+        except LLMAuthError as e:
+            log.error("Daily compression auth failed for %s: %s", mask_phone(sender), e)
+            raise
         except Exception as e:
             log.error("Daily compression LLM call failed for %s: %s", mask_phone(sender), e)
             return
@@ -199,6 +202,9 @@ class Compressor:
 
         try:
             result = await self.llm.summarize(prompt, ROLLUP_SCHEMA)
+        except LLMAuthError as e:
+            log.error("Weekly compression auth failed for %s: %s", mask_phone(sender), e)
+            raise
         except Exception as e:
             log.error("Weekly compression failed for %s: %s", mask_phone(sender), e)
             return
@@ -253,6 +259,9 @@ class Compressor:
 
         try:
             result = await self.llm.summarize(prompt, ROLLUP_SCHEMA)
+        except LLMAuthError as e:
+            log.error("Monthly compression auth failed for %s: %s", mask_phone(sender), e)
+            raise
         except Exception as e:
             log.error("Monthly compression failed for %s: %s", mask_phone(sender), e)
             return
@@ -301,6 +310,8 @@ class Compressor:
                     log.info("Compressed %s for %s (%d messages)", current, mask_phone(sender), len(messages))
                 else:
                     log.debug("No messages for %s on %s, skipping", mask_phone(sender), current)
+            except LLMAuthError:
+                return  # Auth failure — skip everything, don't retry with bad credentials
             except Exception as e:
                 log.error("Daily compression failed for %s on %s: %s", mask_phone(sender), current, e)
                 return  # Don't update last_compressed — next run will retry
@@ -311,10 +322,14 @@ class Compressor:
         # Roll up older entries
         try:
             await self.compress_weekly(sender)
+        except LLMAuthError:
+            return
         except Exception as e:
             log.error("Weekly compression failed for %s: %s", mask_phone(sender), e)
 
         try:
             await self.compress_monthly(sender)
+        except LLMAuthError:
+            return
         except Exception as e:
             log.error("Monthly compression failed for %s: %s", mask_phone(sender), e)
