@@ -224,6 +224,30 @@ async def test_suggested_id_not_saved_when_invalid_type(digest, tmp_data_dir, mo
     assert len(ids) == 0
 
 
+async def test_suggested_id_fallback_from_message(digest, tmp_data_dir, mock_llm, mock_seerr):
+    """When LLM returns null suggested_tmdb_id, extract from message text."""
+    mock_llm.summarize.return_value = {
+        "send": True,
+        "message": "Good morning. Check out Cool Movie (2026) — a fun ride, 8.1/10. Want me to add it?",
+        "suggested_tmdb_id": None,
+    }
+    await digest.build(SENDER)
+    ids = digest._load_suggested_ids(SENDER)
+    assert 100 in ids
+
+
+async def test_suggested_id_fallback_no_match(digest, tmp_data_dir, mock_llm, mock_seerr):
+    """Fallback doesn't save anything when the message doesn't match trending titles."""
+    mock_llm.summarize.return_value = {
+        "send": True,
+        "message": "Good morning. Nothing special trending today.",
+        "suggested_tmdb_id": None,
+    }
+    await digest.build(SENDER)
+    ids = digest._load_suggested_ids(SENDER)
+    assert len(ids) == 0
+
+
 async def test_suggested_ids_capped_at_100(digest, tmp_data_dir):
     """Suggested IDs file is capped at 100 entries."""
     existing = list(range(100))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING
@@ -18,6 +19,25 @@ from .types import MediaStatus
 from .utils import mask_phone, safe_data_path
 
 log = logging.getLogger(__name__)
+
+# Pattern: "- [tmdb:12345] Title (2024) movie — ..."
+_TRENDING_RE = re.compile(r"\[tmdb:(\d+)\]\s+(.+?)\s+(?:movie|tv)\s+—")
+
+
+def _match_trending_title(trending: str, message: str) -> int | None:
+    """Find a trending TMDB ID whose title appears in the LLM message.
+
+    Falls back to this when the LLM returns null for suggested_tmdb_id.
+    """
+    msg_lower = message.lower()
+    for m in _TRENDING_RE.finditer(trending):
+        tmdb_id = int(m.group(1))
+        raw_title = m.group(2).strip()
+        # Strip year suffix like "(2024)" to get the bare title
+        title = re.sub(r"\s*\(\d{4}\)$", "", raw_title)
+        if re.search(r"\b" + re.escape(title.lower()) + r"\b", msg_lower):
+            return tmdb_id
+    return None
 
 
 class MorningDigest:
@@ -97,6 +117,12 @@ class MorningDigest:
 
         # Track the suggested tmdb_id for rotation
         suggested_id = result.get("suggested_tmdb_id")
+        if not isinstance(suggested_id, int) and trending and message:
+            # Fallback: LLM didn't return the ID — match message against
+            # the trending candidates we showed it.
+            suggested_id = _match_trending_title(trending, message)
+            if suggested_id is not None:
+                log.debug("Extracted suggested_tmdb_id %d from message text", suggested_id)
         if isinstance(suggested_id, int):
             self._save_suggested_id(sender, suggested_id, existing=suggested_ids)
 
