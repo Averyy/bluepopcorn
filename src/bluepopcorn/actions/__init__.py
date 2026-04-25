@@ -83,6 +83,10 @@ class ActionExecutor:
         self._prompt_cache_ctx_count: dict[str, int] = {}
         # Whether the most recent prompt had a conversation gap (stale topic)
         self._has_gap: dict[str, bool] = {}
+        # Hard ceiling on LLM calls per handle_message cycle. Caps the
+        # damage from any future recursive bug — without this, a bad
+        # validation/fallback loop can spin until rate-limited.
+        self._llm_calls_this_turn: dict[str, int] = {}
 
     # ── Context buffer helpers ───────────────────────────────────
 
@@ -117,13 +121,61 @@ class ActionExecutor:
 
     # ── Main entry point ─────────────────────────────────────────
 
+    # ── Cost / loop safeguards ────────────────────────────────────
+    # Multiple independent safety nets so a single bug can't burn the
+    # API budget. Real turns never approach these caps.
+    #
+    # MAX_LLM_CALLS_PER_TURN: hard ceiling on `llm.decide` calls inside
+    # one handle_message cycle. Decide → fallback search → respond →
+    # maybe one follow-up request = 4 calls in the worst legitimate
+    # case. We allow 6 for headroom.
+    #
+    # MAX_TURN_WALL_SECONDS: independent wall-clock limit. Even if the
+    # call counter is bypassed somehow, the whole cycle aborts. Default
+    # llm_timeout is 60s × 6 calls = 6 min worst case; cap at 90s so
+    # a single slow call can't run forever and a loop of fast calls
+    # also can't sneak past.
+    MAX_LLM_CALLS_PER_TURN = 6
+    MAX_TURN_WALL_SECONDS = 90.0
+
     async def handle_message(
         self,
         sender_phone: str,
         text: str,
     ) -> str:
-        """Process a user message through the full LLM -> action -> response loop."""
+        """Process a user message through the full LLM -> action -> response loop.
+
+        Wrapped in :func:`asyncio.wait_for` so the entire turn aborts at
+        ``MAX_TURN_WALL_SECONDS`` regardless of how many LLM calls or
+        Seerr requests are in flight.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._handle_message_inner(sender_phone, text),
+                timeout=self.MAX_TURN_WALL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "handle_message timed out after %ss for %s "
+                "(message=%r, llm_calls=%d) — likely a recursive bug",
+                self.MAX_TURN_WALL_SECONDS,
+                mask_phone(sender_phone),
+                text[:80],
+                self._llm_calls_this_turn.get(sender_phone, 0),
+            )
+            self._prompt_cache.pop(sender_phone, None)
+            self._prompt_cache_ctx_count.pop(sender_phone, None)
+            self._llm_calls_this_turn.pop(sender_phone, None)
+            return ERROR_GENERIC
+
+    async def _handle_message_inner(
+        self,
+        sender_phone: str,
+        text: str,
+    ) -> str:
+        """Inner body of handle_message — wrapped by the wall-clock guard."""
         self._track_cli(sender_phone, "user", text)
+        self._llm_calls_this_turn[sender_phone] = 0
 
         # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
@@ -144,17 +196,20 @@ class ActionExecutor:
 
         # Get LLM decision
         try:
+            self._llm_calls_this_turn[sender_phone] += 1
             decision, meta = await self.llm.decide(prompt)
             log.info("LLM action=%s query=%s tmdb_id=%s", decision.action.value, decision.query or "-", decision.tmdb_id or "-")
         except LLMAuthError as e:
             log.error("LLM auth failed: %s", e)
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
+            self._llm_calls_this_turn.pop(sender_phone, None)
             return ERROR_AUTH
         except Exception as e:
             log.error("LLM call failed: %s", e)
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
+            self._llm_calls_this_turn.pop(sender_phone, None)
             return ERROR_GENERIC
 
         # Execute the action
@@ -164,6 +219,7 @@ class ActionExecutor:
             # Clear prompt cache after message is fully handled (or on error)
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
+            self._llm_calls_this_turn.pop(sender_phone, None)
         self._track_cli(sender_phone, "assistant", response)
 
         return response
@@ -176,6 +232,29 @@ class ActionExecutor:
 
         ``scenario`` selects the instruction from INSTRUCTION dict in prompts.py.
         """
+        # Hard cap before another LLM call — guards against any bug that
+        # would otherwise loop fallback → respond → request → fallback
+        # against the live API. Real turns never approach this cap.
+        calls = self._llm_calls_this_turn.get(sender_phone, 0)
+        # Early-warning rail: real turns max out at ~4. If we hit 4+,
+        # something is probably looping — log a warning so it's visible
+        # in the daemon log before we actually trip the hard cap.
+        if calls >= 4:
+            log.warning(
+                "_llm_respond: %d LLM calls already this turn for %s "
+                "(scenario=%s) — approaching MAX_LLM_CALLS_PER_TURN=%d. "
+                "Investigate if this happens often.",
+                calls, mask_phone(sender_phone), scenario,
+                self.MAX_LLM_CALLS_PER_TURN,
+            )
+        if calls >= self.MAX_LLM_CALLS_PER_TURN:
+            log.error(
+                "Aborting _llm_respond: hit MAX_LLM_CALLS_PER_TURN=%d for %s "
+                "(scenario=%s). Likely a recursive bug — check action chain.",
+                self.MAX_LLM_CALLS_PER_TURN, mask_phone(sender_phone), scenario,
+            )
+            return ERROR_GENERIC, False
+
         cached = self._prompt_cache.get(sender_phone)
         if cached is not None:
             # Append only context entries added since the cache was built
@@ -191,6 +270,7 @@ class ActionExecutor:
             return ERROR_GENERIC, False
         prompt += f"\n---\n[INSTRUCTION: {instruction}]"
         try:
+            self._llm_calls_this_turn[sender_phone] = calls + 1
             decision, meta = await self.llm.decide(prompt, schema=RESPOND_SCHEMA)
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
             multi = decision.multiple_results

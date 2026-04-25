@@ -29,6 +29,27 @@ log = logging.getLogger(__name__)
 MAX_COLLECTION_SIZE = 20
 
 
+def _tmdb_id_backed_by_context(executor: ActionExecutor, sender_phone: str, tmdb_id: int) -> bool:
+    """Return True if `tmdb:<id>` appears in anything the LLM has seen.
+
+    Search / recommend / recent results render ids as ``tmdb:<id>`` via
+    ``format_result_line`` in ``_base.py``, so a substring check is
+    enough to distinguish an id the LLM read from one it invented.
+    Checks both the cached call-1 prompt and the in-flight context
+    buffer — the latter matters when handle_request is reached
+    recursively via ``_llm_respond`` after a fallback search has added
+    fresh results to context.
+    """
+    needle = f"tmdb:{tmdb_id}"
+    cached = executor._prompt_cache.get(sender_phone) or ""
+    if needle in cached:
+        return True
+    for _ts, text in executor._context.get(sender_phone, []):
+        if needle in text:
+            return True
+    return False
+
+
 async def handle_request(
     executor: ActionExecutor, decision: LLMDecision, sender_phone: str
 ) -> str:
@@ -36,6 +57,23 @@ async def handle_request(
     # Collection request — batch-add all movies in a collection
     if decision.collection_id:
         return await _handle_collection_request(executor, decision, sender_phone)
+
+    # Reject tmdb_ids the LLM invented (not found in any <context> block it
+    # was shown). Haiku sometimes hallucinates ids when confirming titles
+    # that only appeared in a digest or memory; trusting those leads to
+    # requesting the wrong Seerr record and lying about it to the user.
+    # Null out the unbacked id and fall through to the missing-id search
+    # fallback below — the LLM will then see real search results.
+    if decision.tmdb_id and not _tmdb_id_backed_by_context(
+        executor, sender_phone, decision.tmdb_id,
+    ):
+        log.info(
+            "Rejecting unbacked tmdb_id=%d (not in prompt <context>); "
+            "forcing search fallback",
+            decision.tmdb_id,
+        )
+        decision.tmdb_id = None
+        decision.media_type = None
 
     if not decision.tmdb_id or not decision.media_type:
         # LLM chose request but didn't provide the ID — search for what the
@@ -98,7 +136,9 @@ async def handle_request(
                     status = MediaStatus.UNKNOWN
 
                 if status in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE, MediaStatus.PROCESSING, MediaStatus.PENDING):
-                    dedup_context = CONTEXT_DEDUP.format(title=title, status=STATUS_LABELS[status])
+                    dedup_context = CONTEXT_DEDUP.format(
+                        title=title, tmdb_id=decision.tmdb_id, status=STATUS_LABELS[status],
+                    )
                     await executor._store_request_context(sender_phone, title, decision)
                     executor._add_context(sender_phone, dedup_context)
                     return (await executor._llm_respond(sender_phone, scenario="dedup"))[0]

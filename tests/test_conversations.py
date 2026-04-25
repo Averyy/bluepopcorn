@@ -18,7 +18,12 @@ import logging
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+# Allow `python tests/test_conversations.py` (no -m) to find _logging
+sys.path.insert(0, str(Path(__file__).parent))
+from _logging import setup_test_logging as _setup_test_logging
 
 from bluepopcorn.actions import ActionExecutor
 from bluepopcorn.config import load_settings
@@ -710,15 +715,9 @@ async def main() -> None:
     parser.add_argument("--live", action="store_true", help="Actually submit requests to Seerr (default: dry run)")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-    # Show LLM decisions even in non-verbose mode
-    logging.getLogger("bluepopcorn.actions").setLevel(logging.INFO)
-    logging.getLogger("bluepopcorn.llm").setLevel(logging.INFO)
-
     settings = load_settings()
+    _setup_test_logging(settings, verbose=args.verbose, label="conversations")
+
     seerr = SeerrClient(settings)
     llm = LLMClient(settings)
     memory = UserMemory(settings)

@@ -100,6 +100,14 @@ class LLMClient:
         Uses tool_use for structured output — output_config's grammar compiler
         times out on complex schemas (16+ properties), but tool_use handles
         them reliably.
+
+        Note on prompt caching: Anthropic's cache prefix includes
+        ``tools + system + messages`` in that order. Because the decide
+        and respond paths use different ``tools`` (DECIDE_SCHEMA vs
+        RESPOND_SCHEMA), the cache prefix differs between the two and a
+        cache breakpoint anywhere downstream of tools never hits across
+        the call-1 → call-2 pair. To make caching pay off we'd need to
+        unify the schemas — left as a future optimization.
         """
         sdk_model = _SDK_MODEL_MAP.get(model, model)
         log.info("LLM %s: model=%s, prompt_len=%d", label, model, len(prompt))

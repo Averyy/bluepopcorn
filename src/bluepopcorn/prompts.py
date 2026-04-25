@@ -171,7 +171,7 @@ You respond with a JSON object containing an action and a message. Available act
 - **Release date expectations:** TV show episodes are typically available on their air date. Movies in theatres won't appear on the media server until they're released digitally or physically — this can be weeks or months after the theatrical release.
 - **Season selection for TV:** When requesting a TV show with multiple seasons, ask which seasons the user wants unless they already specified. If they say "all" or don't care, omit the `seasons` field. If they say "the latest season" or "newest", use the highest season number from the search results. Set `seasons` to an array of season numbers (e.g. `[1, 2]`).
 - **Collections:** When search results show a movie belongs to a collection (e.g. "Collection: The Dark Knight Collection (id: 263)"), mention it. If the user says "add the whole collection" or "all of them", use action=request with `collection_id` set to the collection ID from the results.
-- When search results come back and the user confirms (or there's one clear match), use **request** with the correct tmdb_id and media_type.
+- When the user confirms a title, only use **request** if you can see the tmdb_id inside a `<context>` tag (a prior Search results or Recommendations block you were shown). A title mentioned in a `<user>`/`<assistant>` message, digest, or `<memory>` entry is NOT a valid source — those never contain tmdb_ids. When the user confirms such a title ("yes", "add it", etc.), use **search** with the title name first.
 - If media is already available (status: available), tell them it's already in their library.
 - If there are multiple matches, present them numbered and ask which one.
 - **When asked "what's new", "what was added", "what else is new", "what else is downloading", "what's pending", or anything about server-wide status, ALWAYS use recent.** Do NOT interpret these as follow-ups about a previously discussed title. Do NOT use reply to answer from context — ALWAYS fetch fresh data with recent, even if recent results are already in the conversation.
@@ -183,6 +183,12 @@ You respond with a JSON object containing an action and a message. Available act
 - Only use **reply** for casual conversation that genuinely has nothing to do with movies, shows, or media. NEVER use reply when the user asks about a title's status, availability, or download progress — always use **search** instead, even if you think you already know the answer from context.
 - Keep the message field short and natural. No markdown, no formatting.
 - Focus on the `<current_user_message>` tag. Messages tagged `<user>` and `<assistant>` are conversation history for context only.
+
+## Requesting (strict — read carefully)
+- You may only emit action=request when the tmdb_id you use appears inside a `<context>` tag already in this prompt (Search results or Recommendations you were shown). If you cannot point to the exact `tmdb:<id>` inside a `<context>` tag, you do not have a valid tmdb_id.
+- NOT valid sources for a tmdb_id: digest/morning messages, the `<memory>` block, titles you wrote yourself, or anything you "remember" from training. These mention titles but do NOT contain tmdb_ids.
+- When the user confirms a title that was only mentioned in a digest/summary/memory ("Yes", "add it", "sure", "ok"), use **action=search** with the title name. "Yes" after a digest means *look it up*, not *request id X*.
+- If you emit action=request without a `<context>`-backed tmdb_id, you will report a success about the wrong title. Never do this. When in doubt, search.
 
 ## Follow-ups
 - When the user asks for more recommendations ("more options", "any others", "show me more", "what else", "more like that"), use **recommend** with the same structured fields as the previous recommend. The system will automatically exclude already-shown results.
@@ -250,7 +256,13 @@ CONTEXT_RECENT_REQUESTED = "Requested:"
 CONTEXT_RECENT_FOOTER = "]"
 CONTEXT_RECENT_EMPTY = "[Server state: no available or requested items found]"
 CONTEXT_EMPTY_REPLY = "[Reply action: LLM returned empty message]"
-CONTEXT_DEDUP = '[Request check: "{title}" is already {status}]'
+CONTEXT_DEDUP = (
+    '[Request check — tmdb:{tmdb_id} resolved on the server to "{title}" '
+    'with state "{status}". If "{title}" is NOT the title the user just '
+    'asked about, you picked the wrong tmdb_id. Do not reply about '
+    '"{title}" and do not fabricate a status for the user\'s title — '
+    'use action=search with the user\'s title to look it up.]'
+)
 CONTEXT_COLLECTION_EMPTY = "[Collection is empty]"
 CONTEXT_COLLECTION_HEADER = "[Collection request: {name}"
 CONTEXT_COLLECTION_REQUESTED = "Requested: {titles}"
@@ -332,9 +344,12 @@ INSTRUCTION: dict[str, str] = {
         "— no available content and no pending requests. Tell the user."
     ),
     "dedup": (
-        "Use action=reply. Do NOT use action=request. "
-        "The user wanted to add this title but it's already on the server. "
-        "Tell them its current status using the exact wording from the context — do not rephrase."
+        "Compare the title in the [Request check] context to the title the user asked about. "
+        "If they MATCH: use action=reply. No new request was made — the title is already on the server. "
+        "Report the exact status from the context. Never use the words 'queued', 'added', "
+        "'requested', 'downloading', or 'started' in this reply — those imply a fresh action that did not happen. "
+        "If they DO NOT match: use action=search with the user's actual title. The tmdb_id was wrong. "
+        "Never fabricate a status for a title Seerr did not return."
     ),
     "empty_reply": (
         "Use action=reply. Respond to the user's current message based on the conversation history. "
