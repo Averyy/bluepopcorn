@@ -78,7 +78,12 @@ async def handle_request(
     if not decision.tmdb_id or not decision.media_type:
         # LLM chose request but didn't provide the ID — search for what the
         # user likely means and hand results back to the LLM to decide.
+        # Skip _last_topic across a conversation gap: it persists in memory
+        # but no longer matches what the user is replying to (e.g. a digest
+        # recommendation overrides a topic from days ago).
         topic = executor._last_topic.get(sender_phone)
+        if executor._has_gap.get(sender_phone, False):
+            topic = None
         search_term = (topic["title"] if topic else None) or decision.query or decision.message or ""
         if search_term:
             try:
