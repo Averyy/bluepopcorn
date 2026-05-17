@@ -90,11 +90,9 @@ async def handle_recommend(
     if display_results:
         top = display_results[0]
         year_str = f" ({top.year})" if top.year else ""
-        executor._last_topic[sender_phone] = {
-            "title": f"{top.title}{year_str}",
-            "tmdb_id": top.tmdb_id,
-            "media_type": top.media_type,
-        }
+        executor.set_topic(
+            sender_phone, f"{top.title}{year_str}", top.tmdb_id, top.media_type,
+        )
 
     return await executor._send_with_poster(
         sender_phone, display_results, scenario="recommend_results",

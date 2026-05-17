@@ -78,12 +78,10 @@ async def handle_request(
     if not decision.tmdb_id or not decision.media_type:
         # LLM chose request but didn't provide the ID — search for what the
         # user likely means and hand results back to the LLM to decide.
-        # Skip _last_topic across a conversation gap: it persists in memory
-        # but no longer matches what the user is replying to (e.g. a digest
-        # recommendation overrides a topic from days ago).
-        topic = executor._last_topic.get(sender_phone)
-        if executor._has_gap.get(sender_phone, False):
-            topic = None
+        # Only use the stored topic if it's still fresh; an older topic from
+        # before a conversation gap shouldn't override what the user is
+        # actually replying to right now.
+        topic = executor._last_topic.get(sender_phone) if executor._topic_is_fresh(sender_phone) else None
         search_term = (topic["title"] if topic else None) or decision.query or decision.message or ""
         if search_term:
             try:
@@ -94,11 +92,9 @@ async def handle_request(
                     executor._add_context(sender_phone, context)
                     top = results[0]
                     year_str = f" ({top.year})" if top.year else ""
-                    executor._last_topic[sender_phone] = {
-                        "title": f"{top.title}{year_str}",
-                        "tmdb_id": top.tmdb_id,
-                        "media_type": top.media_type,
-                    }
+                    executor.set_topic(
+                        sender_phone, f"{top.title}{year_str}", top.tmdb_id, top.media_type,
+                    )
             except Exception as e:
                 log.debug("Fallback search for request failed: %s", e)
         return (await executor._llm_respond(sender_phone, scenario="search_results"))[0]

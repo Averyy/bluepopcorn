@@ -63,11 +63,12 @@ async def handle_recent(
         first = available[0] if available else (requested[0] if requested else None)
         if first:
             year_str = f" ({first['year']})" if first.get("year") else ""
-            executor._last_topic[sender_phone] = {
-                "title": f"{first['title']}{year_str}",
-                "tmdb_id": first["tmdb_id"],
-                "media_type": first["media_type"],
-            }
+            executor.set_topic(
+                sender_phone,
+                f"{first['title']}{year_str}",
+                first["tmdb_id"],
+                first["media_type"],
+            )
 
         return (await executor._llm_respond(sender_phone, scenario="recent_results"))[0]
     except Exception as e:

@@ -71,7 +71,7 @@ class ActionExecutor:
         # In-memory context buffer (search results, API data) per sender
         self._context: dict[str, list[tuple[float, str]]] = {}
         # Most recently discussed title per sender (for pronoun resolution)
-        # Values: {"title": str, "tmdb_id": int, "media_type": str}
+        # Values: {"title": str, "tmdb_id": int, "media_type": str, "set_ts": float}
         self._last_topic: dict[str, dict] = {}
         # Session boundary timestamps (set by "new"/"reset")
         self._session_start: dict[str, float] = {}
@@ -81,8 +81,6 @@ class ActionExecutor:
         self._prompt_cache: dict[str, str] = {}
         # Context count at cache time (to append only new entries in _llm_respond)
         self._prompt_cache_ctx_count: dict[str, int] = {}
-        # Whether the most recent prompt had a conversation gap (stale topic)
-        self._has_gap: dict[str, bool] = {}
         # Hard ceiling on LLM calls per handle_message cycle. Caps the
         # damage from any future recursive bug — without this, a bad
         # validation/fallback loop can spin until rate-limited.
@@ -182,11 +180,11 @@ class ActionExecutor:
         # Mark the current message with a strong delimiter so the LLM focuses on it
         # (chat.db history can be noisy with old conversations)
         prompt += CURRENT_MESSAGE_DELIMITER.format(text=_escape_xml_delimiters(text))
-        # Inject last-discussed topic so the LLM knows what "it" refers to
-        # Includes tmdb_id + media_type so the LLM can request directly
-        # Skip if a conversation gap was detected (stale topic from old conversation)
-        topic = self._last_topic.get(sender_phone)
-        if topic and not self._has_gap.get(sender_phone, False):
+        # Inject last-discussed topic so the LLM knows what "it" refers to.
+        # Skip if the topic itself is stale (older than the gap threshold) —
+        # the chat.db gap marker handles older history independently.
+        if self._topic_is_fresh(sender_phone):
+            topic = self._last_topic[sender_phone]
             safe_title = _escape_xml_delimiters(topic["title"])
             prompt += "\n" + LAST_DISCUSSED_TITLE.format(
                 title=safe_title, tmdb_id=topic["tmdb_id"], media_type=topic["media_type"],
@@ -345,16 +343,12 @@ class ActionExecutor:
 
         # Render with gap markers for 2+ hour gaps
         prev_ts = 0.0
-        has_gap = False
         for ts, tag, content in timeline:
             if prev_ts > 0 and ts - prev_ts >= gap_seconds:
                 parts.append(CONVERSATION_GAP)
-                has_gap = True
             safe = _escape_xml_delimiters(content)
             parts.append(f"<{tag}>{safe}</{tag}>")
             prev_ts = ts
-
-        self._has_gap[sender_phone] = has_gap
 
         return "\n".join(parts)
 
@@ -509,8 +503,28 @@ class ActionExecutor:
             title=title, tmdb_id=decision.tmdb_id, media_type=decision.media_type,
         )
         self._add_context(sender_phone, ctx)
+        self.set_topic(sender_phone, title, decision.tmdb_id, decision.media_type)
+
+    def set_topic(
+        self, sender_phone: str, title: str, tmdb_id: int, media_type: str,
+    ) -> None:
+        """Record the most recently discussed title for pronoun resolution.
+
+        Stamped with the current time so freshness can be evaluated later
+        (e.g. a digest-suggested title remains valid for a few hours even
+        though older chat.db history has gaps before it).
+        """
         self._last_topic[sender_phone] = {
             "title": title,
-            "tmdb_id": decision.tmdb_id,
-            "media_type": decision.media_type,
+            "tmdb_id": tmdb_id,
+            "media_type": media_type,
+            "set_ts": time.time(),
         }
+
+    def _topic_is_fresh(self, sender_phone: str) -> bool:
+        """Return True if the stored topic is recent enough to inject."""
+        topic = self._last_topic.get(sender_phone)
+        if not topic:
+            return False
+        gap_seconds = self.settings.conversation_gap_hours * 3600
+        return (time.time() - topic.get("set_ts", 0)) < gap_seconds

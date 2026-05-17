@@ -532,7 +532,7 @@ async def _run_digest_case(
     print(f"  [D.{num}] {label}...")
     start = time.monotonic()
     try:
-        text = await digest.build(
+        text, _ = await digest.build(
             sender, last_digest=last_digest,
             available=available, pending=pending, trending=trending,
         )

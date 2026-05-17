@@ -120,12 +120,18 @@ async def _send_digest_to_all(
     on_skip: Callable[[str], None],
     on_send: Callable[[str, str], None],
     on_error: Callable[[str, Exception], None],
+    on_suggested: Callable[[str, dict], None] | None = None,
 ) -> None:
     """Fetch data and send per-user digests to all allowed senders.
 
     Shared between the one-shot CLI (``run_digest``) and the daemon
     scheduler (``_schedule_digest``).  Callers provide callbacks for
     skip / send / error reporting so each site can log in its own style.
+
+    ``on_suggested`` fires with the ``{title, tmdb_id, media_type}`` of the
+    digest's recommended title (when one was suggested and matched against
+    the trending pool). The daemon uses this to seed ``_last_topic`` so
+    follow-up replies like "add it" can resolve the right title.
     """
     available, pending = await asyncio.gather(
         digest.fetch_available(),
@@ -135,7 +141,7 @@ async def _send_digest_to_all(
     for phone in settings.allowed_senders:
         try:
             last = _load_last_digest(data_dir, phone)
-            text = await digest.build(
+            text, suggested = await digest.build(
                 sender=phone, last_digest=last,
                 available=available, pending=pending,
             )
@@ -145,6 +151,8 @@ async def _send_digest_to_all(
             await msg_sender.send_text(phone, text)
             _save_last_digest(data_dir, phone, text)
             on_send(phone, text)
+            if suggested and on_suggested is not None:
+                on_suggested(phone, suggested)
         except Exception as e:
             on_error(phone, e)
 
@@ -235,7 +243,7 @@ async def run_daemon(settings: Settings) -> None:
     # Digest + compression scheduler
     compressor = Compressor(settings, llm, monitor, memory)
     digest_task = asyncio.create_task(
-        _schedule_digest(settings, seerr, llm, memory, sender, compressor)
+        _schedule_digest(settings, seerr, llm, memory, sender, compressor, executor)
     )
 
     # Shutdown event
@@ -410,6 +418,7 @@ async def _schedule_digest(
     memory: UserMemory,
     msg_sender: MessageSender,
     compressor: Compressor,
+    executor: ActionExecutor,
 ) -> None:
     """Schedule daily morning digest + memory compression."""
     tz = ZoneInfo(settings.timezone)
@@ -430,11 +439,26 @@ async def _schedule_digest(
 
         try:
             digest = MorningDigest(settings, seerr, llm, memory)
+
+            def _seed_topic(phone: str, suggested: dict) -> None:
+                executor.set_topic(
+                    phone,
+                    suggested["title"],
+                    suggested["tmdb_id"],
+                    suggested["media_type"],
+                )
+                log.info(
+                    "Digest seeded last_topic for %s: %s tmdb:%d %s",
+                    mask_phone(phone), suggested["title"],
+                    suggested["tmdb_id"], suggested["media_type"],
+                )
+
             await _send_digest_to_all(
                 settings, digest, data_dir, msg_sender,
                 on_skip=lambda ph: log.info("Digest skipped for %s (nothing new)", mask_phone(ph)),
                 on_send=lambda ph, t: log.info("Digest sent to %s: %s", mask_phone(ph), t[:80]),
                 on_error=lambda ph, e: log.error("Digest failed for %s: %s", mask_phone(ph), e),
+                on_suggested=_seed_topic,
             )
         except Exception as e:
             log.error("Digest fetch failed: %s", e)

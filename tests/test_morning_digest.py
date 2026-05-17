@@ -90,10 +90,10 @@ SENDER = "+11234567890"
 
 async def test_build_routes_through_llm(digest, mock_llm):
     """Digest message must be composed by the LLM, not Python."""
-    result = await digest.build(SENDER)
+    message, _ = await digest.build(SENDER)
     mock_llm.summarize.assert_called_once()
-    assert result is not None
-    assert "Good morning" in result
+    assert message is not None
+    assert "Good morning" in message
 
 
 async def test_build_passes_memory_to_llm(digest, mock_llm, mock_memory):
@@ -144,16 +144,18 @@ async def test_build_returns_none_when_llm_says_skip(digest, mock_llm):
         "message": "Good morning. Nothing new.",
         "suggested_tmdb_id": None,
     }
-    result = await digest.build(SENDER)
-    assert result is None
+    message, suggested = await digest.build(SENDER)
+    assert message is None
+    assert suggested is None
 
 
 async def test_build_returns_fallback_on_llm_failure(digest, mock_llm):
     """If the LLM call fails, a fallback message is returned (not silent skip)."""
     mock_llm.summarize.side_effect = RuntimeError("claude -p timed out")
-    result = await digest.build(SENDER)
-    assert result is not None
-    assert "Good morning" in result
+    message, suggested = await digest.build(SENDER)
+    assert message is not None
+    assert "Good morning" in message
+    assert suggested is None
 
 
 async def test_build_returns_none_on_empty_message(digest, mock_llm):
@@ -163,8 +165,20 @@ async def test_build_returns_none_on_empty_message(digest, mock_llm):
         "message": "",
         "suggested_tmdb_id": None,
     }
-    result = await digest.build(SENDER)
-    assert result is None
+    message, suggested = await digest.build(SENDER)
+    assert message is None
+    assert suggested is None
+
+
+async def test_build_returns_suggested_metadata(digest, mock_llm):
+    """When the LLM picks a trending title, its metadata comes back for topic seeding."""
+    message, suggested = await digest.build(SENDER)
+    assert message is not None
+    assert suggested == {
+        "title": "Cool Movie (2026)",
+        "tmdb_id": 100,
+        "media_type": "movie",
+    }
 
 
 # ── build() — pre-fetched data ───────────────────────────────────────

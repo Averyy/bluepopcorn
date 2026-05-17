@@ -248,11 +248,11 @@ def seed_conversation(executor: ActionExecutor) -> None:
         HistoryEntry(role=role, content=content, timestamp=now - offset)
         for role, content, offset in msgs
     ]
-    # Production had a >2h gap between 04-19 and 04-23, which sets
-    # _has_gap=True and causes handle_message to SKIP injecting
-    # LAST_DISCUSSED_TITLE. So we do not seed _last_topic here — we want
-    # the LLM to identify the title the same way it did in production
-    # (from the digest message in history).
+    # Production had a >2h gap between 04-19 and 04-23, so any prior
+    # _last_topic would be stale (set_ts older than the gap threshold)
+    # and handle_message would skip injecting LAST_DISCUSSED_TITLE.
+    # We don't seed _last_topic here — we want the LLM to identify the
+    # title the same way it did in production (from the digest in history).
 
 
 async def run_dedup_case(

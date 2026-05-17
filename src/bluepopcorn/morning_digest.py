@@ -21,7 +21,7 @@ from .utils import mask_phone, safe_data_path
 log = logging.getLogger(__name__)
 
 # Pattern: "- [tmdb:12345] Title (2024) movie — ..."
-_TRENDING_RE = re.compile(r"\[tmdb:(\d+)\]\s+(.+?)\s+(?:movie|tv)\s+—")
+_TRENDING_RE = re.compile(r"\[tmdb:(\d+)\]\s+(.+?)\s+(movie|tv)\s+—")
 
 
 def _match_trending_title(trending: str, message: str) -> int | None:
@@ -37,6 +37,21 @@ def _match_trending_title(trending: str, message: str) -> int | None:
         title = re.sub(r"\s*\(\d{4}\)$", "", raw_title)
         if re.search(r"\b" + re.escape(title.lower()) + r"\b", msg_lower):
             return tmdb_id
+    return None
+
+
+def _trending_entry_for_id(trending: str, target_id: int) -> dict | None:
+    """Return {title, tmdb_id, media_type} for the trending line matching target_id.
+
+    Title includes the year suffix as formatted by ``fetch_trending``.
+    """
+    for m in _TRENDING_RE.finditer(trending):
+        if int(m.group(1)) == target_id:
+            return {
+                "title": m.group(2).strip(),
+                "tmdb_id": target_id,
+                "media_type": m.group(3),
+            }
     return None
 
 
@@ -62,12 +77,16 @@ class MorningDigest:
         available: str | None = None,
         pending: str | None = None,
         trending: str | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, dict | None]:
         """Build the morning digest via LLM.
 
         Python fetches raw data (available, pending, trending),
         then Haiku composes the message using the user's memory.
-        Returns None if Haiku decides there's nothing new to report.
+
+        Returns ``(message, suggested)`` where ``message`` is None if Haiku
+        decides there's nothing new to report, and ``suggested`` is the
+        ``{title, tmdb_id, media_type}`` metadata for the recommended title
+        (or None if no title was suggested or it couldn't be matched).
 
         *available* and *pending* can be pre-fetched and passed in to
         avoid redundant Seerr API calls when building for multiple users.
@@ -101,19 +120,19 @@ class MorningDigest:
             )
         except LLMAuthError as e:
             log.error("Digest auth failed: %s", e)
-            return DIGEST_AUTH_FALLBACK
+            return DIGEST_AUTH_FALLBACK, None
         except Exception as e:
             log.error("Digest LLM call failed, sending fallback: %s", e)
-            return DIGEST_FALLBACK
+            return DIGEST_FALLBACK, None
 
         if not result.get("send", False):
             log.info("LLM decided to skip digest for %s (nothing new)", mask_phone(sender))
-            return None
+            return None, None
 
         message = result.get("message", "").strip()
         if not message:
             log.warning("Empty message from digest LLM call, skipping")
-            return None
+            return None, None
 
         # Track the suggested tmdb_id for rotation
         suggested_id = result.get("suggested_tmdb_id")
@@ -123,10 +142,13 @@ class MorningDigest:
             suggested_id = _match_trending_title(trending, message)
             if suggested_id is not None:
                 log.debug("Extracted suggested_tmdb_id %d from message text", suggested_id)
+        suggested: dict | None = None
         if isinstance(suggested_id, int):
             self._save_suggested_id(sender, suggested_id, existing=suggested_ids)
+            if trending:
+                suggested = _trending_entry_for_id(trending, suggested_id)
 
-        return message
+        return message, suggested
 
     # ── Data fetchers (raw values for the LLM prompt) ────────────
 
