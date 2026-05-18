@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,6 +29,12 @@ log = logging.getLogger(__name__)
 # Max movies to request from a single collection
 MAX_COLLECTION_SIZE = 20
 
+# Search/recommend/recent result lines: "N. Title (year) [Movie] tmdb:1234 - ..."
+# `[^\n\[\]]*?` keeps the match anchored to the same result line.
+_RESULT_MEDIA_TYPE_RE = re.compile(r"\[(Movie|TV)\][^\n\[\]]*?tmdb:(\d+)")
+# Last-discussed/topic injection: "[Last discussed title: ... tmdb:1234 movie]"
+_TOPIC_MEDIA_TYPE_RE = re.compile(r"tmdb:(\d+) (movie|tv)\b")
+
 
 def _tmdb_id_backed_by_context(executor: ActionExecutor, sender_phone: str, tmdb_id: int) -> bool:
     """Return True if `tmdb:<id>` appears in anything the LLM has seen.
@@ -48,6 +55,48 @@ def _tmdb_id_backed_by_context(executor: ActionExecutor, sender_phone: str, tmdb
         if needle in text:
             return True
     return False
+
+
+def _known_media_type_for_tmdb(
+    executor: ActionExecutor, sender_phone: str, tmdb_id: int,
+) -> str | None:
+    """Look up the media_type already paired with ``tmdb_id`` in seen context.
+
+    Sources, in order of authority:
+      1. The fresh ``_last_topic`` (set from Seerr search/trending data).
+      2. The cached call-1 prompt (includes the topic injection and
+         any rendered result lines from prior turns within history).
+      3. The in-flight context buffer (this turn's search results).
+
+    Returns ``"movie"`` / ``"tv"`` or None if no pairing is found. Used to
+    override an LLM-hallucinated media_type when authoritative data is
+    on hand — Haiku sometimes returns ``"tv"`` for a movie tmdb (and
+    vice-versa) even after correctly identifying the tmdb_id from a
+    digest suggestion, which then fails the Seerr request with a 500.
+    """
+    topic = executor._last_topic.get(sender_phone)
+    if (
+        topic
+        and topic.get("tmdb_id") == tmdb_id
+        and topic.get("media_type") in ("movie", "tv")
+    ):
+        return topic["media_type"]
+
+    sources: list[str] = []
+    cached = executor._prompt_cache.get(sender_phone)
+    if cached:
+        sources.append(cached)
+    for _ts, text in executor._context.get(sender_phone, []):
+        sources.append(text)
+
+    for source in sources:
+        for m in _RESULT_MEDIA_TYPE_RE.finditer(source):
+            if int(m.group(2)) == tmdb_id:
+                return "tv" if m.group(1) == "TV" else "movie"
+        for m in _TOPIC_MEDIA_TYPE_RE.finditer(source):
+            if int(m.group(1)) == tmdb_id:
+                return m.group(2)
+    return None
 
 
 async def handle_request(
@@ -74,6 +123,21 @@ async def handle_request(
         )
         decision.tmdb_id = None
         decision.media_type = None
+
+    # Override an LLM-hallucinated media_type when seen context disagrees.
+    # Haiku can return the right tmdb_id with the wrong type (movie vs tv),
+    # which then fails Seerr with a 500 from the wrong endpoint. See the
+    # 2026-05-18 Punisher: One Last Kill (tmdb:1439930) incident.
+    if decision.tmdb_id and decision.media_type:
+        known = _known_media_type_for_tmdb(
+            executor, sender_phone, decision.tmdb_id,
+        )
+        if known and known != decision.media_type:
+            log.info(
+                "Correcting media_type for tmdb:%d: %s -> %s (from seen context)",
+                decision.tmdb_id, decision.media_type, known,
+            )
+            decision.media_type = known
 
     if not decision.tmdb_id or not decision.media_type:
         # LLM chose request but didn't provide the ID — search for what the
