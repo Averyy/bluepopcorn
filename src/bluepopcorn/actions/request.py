@@ -111,18 +111,36 @@ async def handle_request(
     # was shown). Haiku sometimes hallucinates ids when confirming titles
     # that only appeared in a digest or memory; trusting those leads to
     # requesting the wrong Seerr record and lying about it to the user.
-    # Null out the unbacked id and fall through to the missing-id search
-    # fallback below — the LLM will then see real search results.
+    # When a handler in this turn just set _last_topic from a real Seerr
+    # result, prefer that tmdb over re-searching — the topic is
+    # authoritative and re-searching with the paren'd title often
+    # returns 0 and loops. Otherwise null out and fall through to the
+    # missing-id search fallback.
     if decision.tmdb_id and not _tmdb_id_backed_by_context(
         executor, sender_phone, decision.tmdb_id,
     ):
         log.info(
-            "Rejecting unbacked tmdb_id=%d (not in prompt <context>); "
-            "forcing search fallback",
+            "Rejecting unbacked tmdb_id=%d (not in prompt <context>)",
             decision.tmdb_id,
         )
-        decision.tmdb_id = None
-        decision.media_type = None
+        turn_start = executor._turn_start_ts.get(sender_phone, float("inf"))
+        topic = executor._last_topic.get(sender_phone)
+        if (
+            topic
+            and topic.get("set_ts", 0) >= turn_start
+            and topic.get("tmdb_id")
+            and topic.get("media_type") in ("movie", "tv")
+        ):
+            log.info(
+                "Substituting this-turn topic tmdb_id=%d media_type=%s",
+                topic["tmdb_id"], topic["media_type"],
+            )
+            decision.tmdb_id = topic["tmdb_id"]
+            decision.media_type = topic["media_type"]
+        else:
+            log.info("No this-turn topic; forcing search fallback")
+            decision.tmdb_id = None
+            decision.media_type = None
 
     # Override an LLM-hallucinated media_type when seen context disagrees.
     # Haiku can return the right tmdb_id with the wrong type (movie vs tv),
@@ -147,6 +165,10 @@ async def handle_request(
         # actually replying to right now.
         topic = executor._last_topic.get(sender_phone) if executor._topic_is_fresh(sender_phone) else None
         search_term = (topic["title"] if topic else None) or decision.query or decision.message or ""
+        # Strip trailing "(YYYY)" — Seerr's year-stripping regex requires
+        # whitespace before the year and won't parse parens, so "Title (2013)"
+        # returns 0 results even when "Title" works.
+        search_term = re.sub(r"\s*\(\d{4}\)\s*$", "", search_term).strip() or search_term
         if search_term:
             try:
                 results = await executor.seerr.search(search_term)

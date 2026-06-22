@@ -85,6 +85,10 @@ class ActionExecutor:
         # damage from any future recursive bug — without this, a bad
         # validation/fallback loop can spin until rate-limited.
         self._llm_calls_this_turn: dict[str, int] = {}
+        # Wall-clock start of the current turn. Lets handlers tell whether
+        # _last_topic was set during this turn (authoritative — came from
+        # a real Seerr result just now) vs carried over from a prior turn.
+        self._turn_start_ts: dict[str, float] = {}
 
     # ── Context buffer helpers ───────────────────────────────────
 
@@ -164,6 +168,7 @@ class ActionExecutor:
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
             self._llm_calls_this_turn.pop(sender_phone, None)
+            self._turn_start_ts.pop(sender_phone, None)
             return ERROR_GENERIC
 
     async def _handle_message_inner(
@@ -174,6 +179,7 @@ class ActionExecutor:
         """Inner body of handle_message — wrapped by the wall-clock guard."""
         self._track_cli(sender_phone, "user", text)
         self._llm_calls_this_turn[sender_phone] = 0
+        self._turn_start_ts[sender_phone] = time.time()
 
         # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
@@ -202,12 +208,14 @@ class ActionExecutor:
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
             self._llm_calls_this_turn.pop(sender_phone, None)
+            self._turn_start_ts.pop(sender_phone, None)
             return ERROR_AUTH
         except Exception as e:
             log.error("LLM call failed: %s", e)
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
             self._llm_calls_this_turn.pop(sender_phone, None)
+            self._turn_start_ts.pop(sender_phone, None)
             return ERROR_GENERIC
 
         # Execute the action
@@ -218,6 +226,7 @@ class ActionExecutor:
             self._prompt_cache.pop(sender_phone, None)
             self._prompt_cache_ctx_count.pop(sender_phone, None)
             self._llm_calls_this_turn.pop(sender_phone, None)
+            self._turn_start_ts.pop(sender_phone, None)
         self._track_cli(sender_phone, "assistant", response)
 
         return response
@@ -275,6 +284,18 @@ class ActionExecutor:
             # Allow request as a follow-up (user confirms a search result)
             if decision.action == Action.REQUEST and (decision.tmdb_id or decision.collection_id):
                 return await handle_request(self, decision, sender_phone), multi
+            # Allow the LLM to refine a search after seeing partial / empty
+            # results. RESPOND_SCHEMA enumerates only reply/request but
+            # tool_use enums aren't strictly enforced, and Haiku has been
+            # seen to pick action=search when 0 results came back. Honor
+            # it — MAX_LLM_CALLS_PER_TURN bounds the worst case.
+            if decision.action == Action.SEARCH and (decision.query or decision.message):
+                log.info(
+                    "LLM picked action=search in respond (scenario=%s); "
+                    "executing refined search",
+                    scenario,
+                )
+                return await handle_search(self, decision, sender_phone), multi
             # Only accept reply — any other action means the LLM is confused
             if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
                 return decision.message, multi

@@ -219,3 +219,133 @@ async def test_handle_request_leaves_correct_media_type_alone(monkeypatch):
     args, _ = exec_.seerr.request_media.call_args
     assert args[0] == "tv"
     assert decision.media_type == "tv"
+
+
+# ── Unbacked-tmdb substitution / fallback search query ────────────────
+
+
+@pytest.mark.asyncio
+async def test_unbacked_tmdb_substitutes_this_turn_topic():
+    """LLM hallucinates an unbacked tmdb after this-turn search set the topic.
+
+    Reproduces the 2026-06-21 16:59 loop: search returned 1 result and
+    set ``_last_topic`` to ``tmdb:152742`` in this turn. The LLM then
+    emitted ``tmdb_id=238269`` (hallucinated). The handler must
+    substitute the topic's tmdb instead of nulling out and re-searching.
+    """
+    turn_start = time.time()
+    exec_ = MagicMock()
+    exec_._turn_start_ts = {SENDER: turn_start}
+    exec_._last_topic = {SENDER: {
+        "title": "The Best Offer (2013)",
+        "tmdb_id": 152742,
+        "media_type": "movie",
+        "set_ts": turn_start + 0.01,  # set during this turn
+    }}
+    exec_._prompt_cache = {SENDER: "1. The Best Offer (2013) [Movie] tmdb:152742"}
+    exec_._context = {SENDER: []}
+    exec_._store_request_context = AsyncMock()
+    exec_._add_context = MagicMock()
+    exec_.request_tracker = None
+    exec_.seerr.get_media_status = AsyncMock(return_value={
+        "id": 152742,
+        "title": "The Best Offer",
+        "releaseDate": "2013-01-01",
+        "mediaInfo": None,
+    })
+    exec_.seerr.request_media = AsyncMock(return_value={"id": 100})
+
+    decision = LLMDecision(
+        action=Action.REQUEST,
+        message="The Best Offer (2013) added to your queue.",
+        tmdb_id=238269,  # hallucinated
+        media_type="movie",
+    )
+
+    await handle_request(exec_, decision, SENDER)
+
+    # No fallback search was run; topic tmdb was used directly.
+    exec_.seerr.search = AsyncMock()  # would have been used if fallback fired
+    exec_.seerr.request_media.assert_awaited_once()
+    args, _ = exec_.seerr.request_media.call_args
+    assert args[0] == "movie"
+    assert args[1] == 152742
+    assert decision.tmdb_id == 152742
+
+
+@pytest.mark.asyncio
+async def test_unbacked_tmdb_stale_topic_falls_back_to_search():
+    """Topic from a prior turn must NOT be used to substitute.
+
+    If the topic predates this turn, we can't be sure the user is
+    still talking about it. Fall through to the existing search
+    fallback rather than requesting the wrong title.
+    """
+    turn_start = time.time()
+    exec_ = MagicMock()
+    exec_._turn_start_ts = {SENDER: turn_start}
+    exec_._last_topic = {SENDER: {
+        "title": "Old Title (2010)",
+        "tmdb_id": 111,
+        "media_type": "movie",
+        "set_ts": turn_start - 60,  # set BEFORE this turn
+    }}
+    exec_._prompt_cache = {SENDER: ""}
+    exec_._context = {SENDER: []}
+    exec_._add_context = MagicMock()
+    exec_.request_tracker = None
+    exec_._enrich_results = AsyncMock()
+    exec_._llm_respond = AsyncMock(return_value=("reply text", False))
+    exec_._topic_is_fresh = MagicMock(return_value=True)
+    exec_.seerr.search = AsyncMock(return_value=[])
+
+    decision = LLMDecision(
+        action=Action.REQUEST,
+        message="adding",
+        tmdb_id=999999,  # hallucinated, not in context
+        media_type="movie",
+    )
+
+    await handle_request(exec_, decision, SENDER)
+
+    # Substitution skipped: tmdb was nulled and fallback search ran.
+    assert decision.tmdb_id is None
+    exec_.seerr.search.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fallback_search_strips_parenthesized_year():
+    """Topic title "Title (YYYY)" must be stripped before searching Seerr.
+
+    Seerr's year-strip regex requires whitespace before the year and
+    doesn't handle "(2013)" — sending it verbatim returns 0 results
+    and triggers a hallucination loop.
+    """
+    exec_ = MagicMock()
+    exec_._turn_start_ts = {SENDER: time.time()}
+    exec_._last_topic = {SENDER: {
+        "title": "The Best Offer (2013)",
+        "tmdb_id": 152742,
+        "media_type": "movie",
+        "set_ts": time.time() - 60,  # stale → won't substitute, will search
+    }}
+    exec_._prompt_cache = {SENDER: ""}
+    exec_._context = {SENDER: []}
+    exec_._add_context = MagicMock()
+    exec_._enrich_results = AsyncMock()
+    exec_._llm_respond = AsyncMock(return_value=("reply", False))
+    exec_._topic_is_fresh = MagicMock(return_value=True)
+    exec_.seerr.search = AsyncMock(return_value=[])
+
+    decision = LLMDecision(
+        action=Action.REQUEST,
+        message="add",
+        tmdb_id=None,
+        media_type=None,
+    )
+
+    await handle_request(exec_, decision, SENDER)
+
+    exec_.seerr.search.assert_awaited_once()
+    args, _ = exec_.seerr.search.call_args
+    assert args[0] == "The Best Offer"  # paren'd year stripped
