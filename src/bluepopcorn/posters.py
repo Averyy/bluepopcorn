@@ -40,7 +40,7 @@ class PosterHandler:
         try:
             resp = await self.client.get(url)
             resp.raise_for_status()
-            local_path.write_bytes(resp.content)
+            await asyncio.to_thread(local_path.write_bytes, resp.content)
             log.info("Downloaded poster: %s", filename)
             return local_path
         except httpx.HTTPError as e:

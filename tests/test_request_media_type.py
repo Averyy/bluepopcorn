@@ -79,17 +79,34 @@ def test_known_media_type_topic_tmdb_mismatch_falls_through():
             "media_type": "tv",
             "set_ts": time.time(),
         },
-        cached_prompt="1. The Punisher: One Last Kill (2026) [Movie] tmdb:1439930 - desc",
+        context_entries=[
+            "1. The Punisher: One Last Kill (2026) [Movie] tmdb:1439930 - desc",
+        ],
     )
     assert _known_media_type_for_tmdb(exec_, SENDER, 1439930) == "movie"
 
 
-def test_known_media_type_from_cached_prompt_topic_injection():
-    """LAST_DISCUSSED_TITLE format in the cached prompt is matched."""
+def test_known_media_type_from_context_topic_injection():
+    """LAST_DISCUSSED_TITLE format in the context buffer is matched."""
+    exec_ = _executor(
+        context_entries=[
+            "[Last discussed title: Punisher (2026) tmdb:1439930 movie]",
+        ],
+    )
+    assert _known_media_type_for_tmdb(exec_, SENDER, 1439930) == "movie"
+
+
+def test_known_media_type_ignores_prompt_only_text():
+    """User/memory text in the prompt must NOT back a media_type pairing.
+
+    The prompt contains user-authored text; only the context buffer and
+    _last_topic are trusted (a user typing "tmdb:123 movie" or an
+    overview containing the pattern must not validate an id).
+    """
     exec_ = _executor(
         cached_prompt="[Last discussed title: Punisher (2026) tmdb:1439930 movie]",
     )
-    assert _known_media_type_for_tmdb(exec_, SENDER, 1439930) == "movie"
+    assert _known_media_type_for_tmdb(exec_, SENDER, 1439930) is None
 
 
 def test_known_media_type_from_search_result_in_context():

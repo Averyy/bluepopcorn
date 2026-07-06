@@ -18,6 +18,7 @@ from ..prompts import (
     CONTEXT_COLLECTION_REQUESTED,
     CONTEXT_DEDUP,
     CONTEXT_SEARCH_EMPTY,
+    CONTEXT_SEARCH_ERROR,
     CONTEXT_SEARCH_REPEAT,
     CONTEXT_SEASON_INVALID,
     ERROR_GENERIC,
@@ -40,20 +41,36 @@ _TOPIC_MEDIA_TYPE_RE = re.compile(r"tmdb:(\d+) (movie|tv)\b")
 
 
 def _tmdb_id_backed_by_context(executor: ActionExecutor, sender_phone: str, tmdb_id: int) -> bool:
-    """Return True if `tmdb:<id>` appears in anything the LLM has seen.
+    """Return True if ``tmdb_id`` came from real Seerr data we injected.
 
-    Search / recommend / recent results render ids as ``tmdb:<id>`` via
-    ``format_result_line`` in ``_base.py``, so a substring check is
-    enough to distinguish an id the LLM read from one it invented.
-    Checks both the cached call-1 prompt and the in-flight context
-    buffer — the latter matters when handle_request is reached
-    recursively via ``_llm_respond`` after a fallback search has added
-    fresh results to context.
+    Authoritative sources only: the stored last-discussed topic and the
+    context buffer (search/recommend/recent results render ids as
+    ``tmdb:<id>`` via ``format_result_line`` in ``_base.py``). The full
+    prompt is deliberately NOT scanned — it contains user/memory text,
+    so "add tmdb:123" typed by the user (or an overview that happens to
+    contain the pattern) would validate a hallucinated id.
     """
-    needle = f"tmdb:{tmdb_id}"
-    cached = executor._prompt_cache.get(sender_phone) or ""
-    if needle in cached:
+    topic = executor._last_topic.get(sender_phone)
+    if topic and topic.get("tmdb_id") == tmdb_id:
         return True
+    needle = f"tmdb:{tmdb_id}"
+    for _ts, text in executor._context.get(sender_phone, []):
+        if needle in text:
+            return True
+    return False
+
+
+def _collection_id_backed_by_context(
+    executor: ActionExecutor, sender_phone: str, collection_id: int,
+) -> bool:
+    """Return True if ``collection_id`` appeared in injected Seerr data.
+
+    Search results render collections as ``Collection: <name> (id: <id>)``
+    (``_base.py``). Same trust model as ``_tmdb_id_backed_by_context`` —
+    a hallucinated collection id would batch-request up to
+    ``MAX_COLLECTION_SIZE`` wrong movies.
+    """
+    needle = f"(id: {collection_id})"
     for _ts, text in executor._context.get(sender_phone, []):
         if needle in text:
             return True
@@ -67,9 +84,10 @@ def _known_media_type_for_tmdb(
 
     Sources, in order of authority:
       1. The fresh ``_last_topic`` (set from Seerr search/trending data).
-      2. The cached call-1 prompt (includes the topic injection and
-         any rendered result lines from prior turns within history).
-      3. The in-flight context buffer (this turn's search results).
+      2. The context buffer (result lines and topic injections from real
+         Seerr data). The full prompt is deliberately NOT scanned — user
+         or memory text could steer the regexes (see
+         ``_tmdb_id_backed_by_context``).
 
     Returns ``"movie"`` / ``"tv"`` or None if no pairing is found. Used to
     override an LLM-hallucinated media_type when authoritative data is
@@ -85,12 +103,7 @@ def _known_media_type_for_tmdb(
     ):
         return topic["media_type"]
 
-    sources: list[str] = []
-    cached = executor._prompt_cache.get(sender_phone)
-    if cached:
-        sources.append(cached)
-    for _ts, text in executor._context.get(sender_phone, []):
-        sources.append(text)
+    sources = [text for _ts, text in executor._context.get(sender_phone, [])]
 
     for source in sources:
         for m in _RESULT_MEDIA_TYPE_RE.finditer(source):
@@ -106,9 +119,18 @@ async def handle_request(
     executor: ActionExecutor, decision: LLMDecision, sender_phone: str
 ) -> str:
     """Execute a request action: add media to Seerr with dedup check."""
-    # Collection request — batch-add all movies in a collection
+    # Collection request — batch-add all movies in a collection.
+    # Reject ids the LLM invented; fall through to the normal tmdb path
+    # (topic substitution / search fallback) instead of requesting 20
+    # wrong movies.
     if decision.collection_id:
-        return await _handle_collection_request(executor, decision, sender_phone)
+        if _collection_id_backed_by_context(executor, sender_phone, decision.collection_id):
+            return await _handle_collection_request(executor, decision, sender_phone)
+        log.info(
+            "Rejecting unbacked collection_id=%d (not in seen context)",
+            decision.collection_id,
+        )
+        decision.collection_id = None
 
     # Reject tmdb_ids the LLM invented (not found in any <context> block it
     # was shown). Haiku sometimes hallucinates ids when confirming titles
@@ -188,11 +210,13 @@ async def handle_request(
                     sender_phone, CONTEXT_SEARCH_REPEAT.format(query=search_term)
                 )
                 return (await executor._llm_respond(sender_phone, scenario="forced_reply"))[0]
-            executor._searched_this_turn.setdefault(sender_phone, set()).add(
-                normalize_search_query(search_term)
-            )
             try:
                 results = await executor.seerr.search(search_term)
+                # Completed — register for same-turn dedup (not on error:
+                # a retry after a transient failure is legitimate).
+                executor._searched_this_turn.setdefault(sender_phone, set()).add(
+                    normalize_search_query(search_term)
+                )
                 if results:
                     await executor._enrich_results(results, enrich_downloads=True)
                     context = format_search_results(results, query=search_term)
@@ -209,7 +233,11 @@ async def handle_request(
                         sender_phone, CONTEXT_SEARCH_EMPTY.format(query=search_term)
                     )
             except Exception as e:
-                log.debug("Fallback search for request failed: %s", e)
+                log.warning("Fallback search for request failed (%r): %s", search_term, e)
+                # Record the failure too — an uninformed call 2 hallucinates.
+                executor._add_context(
+                    sender_phone, CONTEXT_SEARCH_ERROR.format(query=search_term)
+                )
         return (await executor._llm_respond(sender_phone, scenario="search_results"))[0]
 
     # Check if already requested/available before making a duplicate request
@@ -253,7 +281,8 @@ async def handle_request(
                     dedup_context = CONTEXT_DEDUP.format(
                         title=title, tmdb_id=decision.tmdb_id, status=STATUS_LABELS[status],
                     )
-                    await executor._store_request_context(sender_phone, title, decision)
+                    if title != "this":
+                        await executor._store_request_context(sender_phone, title, decision)
                     executor._add_context(sender_phone, dedup_context)
                     return (await executor._llm_respond(sender_phone, scenario="dedup"))[0]
     except Exception as e:
@@ -263,11 +292,18 @@ async def handle_request(
         await executor.seerr.request_media(
             decision.media_type, decision.tmdb_id, seasons=seasons
         )
-        await executor._store_request_context(sender_phone, title, decision)
+        # Only store the topic when the real title resolved — storing the
+        # "this" placeholder makes a later follow-up search Seerr for the
+        # literal string "this"
+        if title != "this":
+            await executor._store_request_context(sender_phone, title, decision)
         # Track request for targeted notifications
         if executor.request_tracker:
             await executor.request_tracker.record(decision.media_type, decision.tmdb_id, sender_phone)
-        return decision.message
+        if decision.message and decision.message.strip():
+            return decision.message.strip()
+        # LLM omitted the confirmation text — craft one instead of texting nothing
+        return (await executor._llm_respond(sender_phone, scenario="empty_reply"))[0]
     except Exception as e:
         log.error("Request failed (type=%s tmdb=%s): %s", decision.media_type, decision.tmdb_id, e)
         return ERROR_GENERIC

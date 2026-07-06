@@ -19,6 +19,7 @@ from ..seerr import SeerrClient
 from ..sender import MessageSender
 from ..prompts import (
     CONTEXT_EMPTY_REPLY,
+    CONTEXT_SEARCH_BUDGET,
     CONTEXT_SEARCH_REPEAT,
     CONVERSATION_GAP,
     CURRENT_MESSAGE_DELIMITER,
@@ -68,21 +69,26 @@ class ActionExecutor:
         self.monitor = monitor
         self.settings = settings
         self.request_tracker = request_tracker
-        # Track recently sent poster tmdb_ids per phone to avoid re-sending
-        self._sent_posters: dict[str, set[int]] = {}
+        # Recently sent poster tmdb_ids per phone: {tmdb_id: sent_ts}.
+        # Timestamped so suppression expires with the conversation gap —
+        # a permanent set means asking about the same movie weeks later
+        # never shows its poster again until a daemon restart.
+        self._sent_posters: dict[str, dict[int, float]] = {}
         # In-memory context buffer (search results, API data) per sender
         self._context: dict[str, list[tuple[float, str]]] = {}
         # Most recently discussed title per sender (for pronoun resolution)
         # Values: {"title": str, "tmdb_id": int, "media_type": str, "set_ts": float}
         self._last_topic: dict[str, dict] = {}
-        # Session boundary timestamps (set by "new"/"reset")
-        self._session_start: dict[str, float] = {}
         # CLI-mode message history (no chat.db available)
         self._cli_history: dict[str, list[HistoryEntry]] = {}
         # Cached base prompt per sender (within a single handle_message cycle)
         self._prompt_cache: dict[str, str] = {}
-        # Context count at cache time (to append only new entries in _llm_respond)
-        self._prompt_cache_ctx_count: dict[str, int] = {}
+        # Wall-clock time the cached prompt was built. _llm_respond appends
+        # only context entries with ts >= this. A timestamp threshold (not a
+        # list index) — _add_context trims the buffer to 50 entries, which
+        # shifts indices and made an index-based slice silently drop
+        # this-turn results for senders with a full buffer.
+        self._prompt_cache_ctx_ts: dict[str, float] = {}
         # Hard ceiling on LLM calls per handle_message cycle. Caps the
         # damage from any future recursive bug — without this, a bad
         # validation/fallback loop can spin until rate-limited.
@@ -141,16 +147,20 @@ class ActionExecutor:
     #
     # MAX_TURN_WALL_SECONDS: independent wall-clock limit. Even if the
     # call counter is bypassed somehow, the whole cycle aborts. Default
-    # llm_timeout is 60s × 6 calls = 6 min worst case; cap at 90s so
+    # llm_timeout is 30s × 6 calls = 3 min worst case; cap at 90s so
     # a single slow call can't run forever and a loop of fast calls
     # also can't sneak past.
     MAX_LLM_CALLS_PER_TURN = 6
     MAX_TURN_WALL_SECONDS = 90.0
+    # Distinct Seerr searches allowed per turn. A legitimate turn needs at
+    # most two (initial + one genuine refinement); the cap stops loops that
+    # dodge the exact-query dedup with endless query variants.
+    MAX_SEARCHES_PER_TURN = 3
 
     def _clear_turn_state(self, sender_phone: str) -> None:
         """Drop all per-turn state after a turn completes or aborts."""
         self._prompt_cache.pop(sender_phone, None)
-        self._prompt_cache_ctx_count.pop(sender_phone, None)
+        self._prompt_cache_ctx_ts.pop(sender_phone, None)
         self._llm_calls_this_turn.pop(sender_phone, None)
         self._turn_start_ts.pop(sender_phone, None)
         self._searched_this_turn.pop(sender_phone, None)
@@ -209,7 +219,7 @@ class ActionExecutor:
                 title=safe_title, tmdb_id=topic["tmdb_id"], media_type=topic["media_type"],
             )
         self._prompt_cache[sender_phone] = prompt
-        self._prompt_cache_ctx_count[sender_phone] = len(self._context.get(sender_phone, []))
+        self._prompt_cache_ctx_ts[sender_phone] = time.time()
 
         # Get LLM decision
         try:
@@ -269,8 +279,12 @@ class ActionExecutor:
         cached = self._prompt_cache.get(sender_phone)
         if cached is not None:
             # Append only context entries added since the cache was built
-            cache_count = self._prompt_cache_ctx_count.get(sender_phone, 0)
-            new_ctx = self._context.get(sender_phone, [])[cache_count:]
+            cache_ts = self._prompt_cache_ctx_ts.get(sender_phone, 0.0)
+            new_ctx = [
+                (ts, text)
+                for ts, text in self._context.get(sender_phone, [])
+                if ts >= cache_ts
+            ]
             extra = "\n".join(f"<{TAG_CONTEXT}>{_escape_xml_delimiters(text)}</{TAG_CONTEXT}>" for _ts, text in new_ctx)
             prompt = cached + "\n" + extra if extra else cached
         else:
@@ -285,6 +299,15 @@ class ActionExecutor:
             decision, meta = await self.llm.decide(prompt, schema=RESPOND_SCHEMA)
             log.debug("LLM respond: action=%s message=%s", decision.action.value, (decision.message or "")[:100])
             multi = decision.multiple_results
+            # forced_reply is terminal: it exists to break decision loops,
+            # so ONLY a reply is accepted — honoring a request/search here
+            # would re-enter the very loop it was invoked to end.
+            if scenario == "forced_reply" and decision.action != Action.REPLY:
+                log.error(
+                    "forced_reply returned action=%s — giving up",
+                    decision.action.value,
+                )
+                return ERROR_GENERIC, False
             # Allow request as a follow-up (user confirms a search result)
             if decision.action == Action.REQUEST and (decision.tmdb_id or decision.collection_id):
                 return await handle_request(self, decision, sender_phone), multi
@@ -292,23 +315,30 @@ class ActionExecutor:
             # results. RESPOND_SCHEMA enumerates only reply/request but
             # tool_use enums aren't strictly enforced, and Haiku has been
             # seen to pick action=search when 0 results came back. Honor
-            # it ONLY for queries not already searched this turn — an
-            # identical search returns identical results, so the LLM makes
-            # the same decision again and loops until the call cap aborts
-            # the turn (the 2026-07-05/06 "Hidden Figures"/"Green Book"
-            # incidents).
+            # it ONLY for queries not already searched this turn and while
+            # the per-turn search budget lasts — an identical search returns
+            # identical results, so the LLM makes the same decision again
+            # and loops until the call cap aborts the turn (the 2026-07-05/06
+            # "Hidden Figures"/"Green Book" incidents), and endless query
+            # variants ("Green Book movie", "Green Book 2018") do the same.
             if decision.action == Action.SEARCH and (decision.query or decision.message):
                 query = decision.query or decision.message
-                if normalize_search_query(query) in self._searched_this_turn.get(sender_phone, set()):
+                searched = self._searched_this_turn.get(sender_phone, set())
+                repeat = normalize_search_query(query, decision.media_type) in searched
+                exhausted = len(searched) >= self.MAX_SEARCHES_PER_TURN
+                if repeat or exhausted:
                     log.warning(
-                        "LLM picked action=search in respond (scenario=%s) but "
-                        "%r was already searched this turn — forcing reply from context",
+                        "LLM picked action=search in respond (scenario=%s) but %r "
+                        "%s — forcing reply from context",
                         scenario, query,
+                        "was already searched this turn" if repeat
+                        else f"exceeds MAX_SEARCHES_PER_TURN={self.MAX_SEARCHES_PER_TURN}",
                     )
-                    if scenario == "forced_reply":
-                        log.error("forced_reply still returned action=search — giving up")
-                        return ERROR_GENERIC, False
-                    self._add_context(sender_phone, CONTEXT_SEARCH_REPEAT.format(query=query))
+                    note = (
+                        CONTEXT_SEARCH_REPEAT.format(query=query)
+                        if repeat else CONTEXT_SEARCH_BUDGET
+                    )
+                    self._add_context(sender_phone, note)
                     return await self._llm_respond(sender_phone, scenario="forced_reply")
                 log.info(
                     "LLM picked action=search in respond (scenario=%s); "
@@ -317,7 +347,7 @@ class ActionExecutor:
                 )
                 return await handle_search(self, decision, sender_phone), multi
             # Only accept reply — any other action means the LLM is confused
-            if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
+            if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) >= 2:
                 return decision.message, multi
             # Confused output (e.g. request without a tmdb_id): retry once
             # with a reply-only instruction instead of erroring at the user.
@@ -327,7 +357,7 @@ class ActionExecutor:
                 decision.action.value, (decision.message or "")[:100], scenario,
             )
             if scenario == "forced_reply":
-                log.error("forced_reply still did not produce a reply — giving up")
+                log.error("forced_reply still did not produce a usable reply — giving up")
                 return ERROR_GENERIC, False
             return await self._llm_respond(sender_phone, scenario="forced_reply")
         except LLMAuthError as e:
@@ -362,11 +392,6 @@ class ActionExecutor:
         else:
             messages = list(self._cli_history.get(sender_phone, []))
 
-        # Filter by session start (messages after "new"/"reset" only)
-        session_start = self._session_start.get(sender_phone)
-        if session_start is not None:
-            messages = [m for m in messages if m.timestamp >= session_start]
-
         # Merge messages + context buffer by timestamp (evict stale context)
         context_entries = self._context.get(sender_phone, [])
         gap_seconds = self.settings.conversation_gap_hours * 3600
@@ -377,8 +402,7 @@ class ActionExecutor:
         for ts, text in context_entries:
             if now - ts > gap_seconds * 2:
                 continue  # Evict context entries older than 2x gap threshold
-            if session_start is None or ts >= session_start:
-                timeline.append((ts, TAG_CONTEXT, text))
+            timeline.append((ts, TAG_CONTEXT, text))
         timeline.sort(key=lambda x: x[0])
 
         msg_count = sum(1 for _, tag, _ in timeline if tag in ("user", "assistant"))
@@ -449,8 +473,16 @@ class ActionExecutor:
         (by title match), renumbered sequentially. This prevents sending
         posters for results the LLM chose to omit.
         """
-        sent_ids = self._sent_posters.get(sender_phone, set())
-        all_shown = all(r.tmdb_id in sent_ids for r in display_results) if display_results else True
+        # Prune expired suppressions (conversation-gap TTL)
+        gap_seconds = self.settings.conversation_gap_hours * 3600
+        now = time.time()
+        sent_map = {
+            tid: ts
+            for tid, ts in self._sent_posters.get(sender_phone, {}).items()
+            if now - ts < gap_seconds
+        }
+        self._sent_posters[sender_phone] = sent_map
+        all_shown = all(r.tmdb_id in sent_map for r in display_results) if display_results else True
 
         # Start raw poster downloads in parallel with LLM (no numbering yet)
         download_task = None
@@ -467,13 +499,16 @@ class ActionExecutor:
                 raw_posters = []
             if raw_posters and self.sender:
                 # Filter posters to only results the LLM actually mentioned
-                raw_posters = self._match_posters_to_response(
+                raw_posters, sent_positions = self._match_posters_to_response(
                     response, display_results, raw_posters,
                 )
                 if len(raw_posters) > 1:
                     if multi:
-                        # Numbered list — add number overlays
-                        numbered = self.posters.number_posters(raw_posters)
+                        # Numbered list — add number overlays (PIL work in a
+                        # thread; it stalls the event loop for 100s of ms)
+                        numbered = await asyncio.to_thread(
+                            self.posters.number_posters, raw_posters
+                        )
                         if numbered:
                             await self.sender.send_images(sender_phone, [str(p) for p in numbered])
                     else:
@@ -486,9 +521,13 @@ class ActionExecutor:
                     _, first_path = raw_posters[0]
                     await self.sender.send_image(sender_phone, str(first_path))
                 await self.sender.start_typing(sender_phone)
-                new_sent = self._sent_posters.setdefault(sender_phone, set())
-                for r in display_results:
-                    new_sent.add(r.tmdb_id)
+                # Mark only the posters actually sent — marking everything
+                # in display_results suppresses posters the LLM omitted
+                # this turn but might present next turn
+                new_sent = self._sent_posters.setdefault(sender_phone, {})
+                for pos in sent_positions:
+                    if 1 <= pos <= len(display_results):
+                        new_sent[display_results[pos - 1].tmdb_id] = time.time()
 
         return response
 
@@ -497,12 +536,13 @@ class ActionExecutor:
         response: str,
         display_results: list[SearchResult],
         raw_posters: list[tuple[int, Path]],
-    ) -> list[tuple[int, Path]]:
+    ) -> tuple[list[tuple[int, Path]], set[int]]:
         """Filter and renumber posters to only those the LLM mentioned.
 
         Matches display_results titles against the LLM response text, then
-        returns only matching posters renumbered sequentially (1, 2, 3...).
-        Falls back to the full list if no titles match (safety net).
+        returns (posters renumbered sequentially, original 1-indexed
+        display_results positions that were kept). Falls back to the full
+        list if no titles match (safety net).
         """
         response_lower = response.lower()
         poster_by_pos = {pos: path for pos, path in raw_posters}
@@ -513,7 +553,7 @@ class ActionExecutor:
         # title-only matches for titles that had no title+year hit. This
         # prevents "Pressure (2026)" from matching all 5 results named "Pressure".
         title_year_matched: set[str] = set()
-        matches: list[tuple[int, Path]] = []  # (mention_idx, poster_path)
+        matches: list[tuple[int, int, Path]] = []  # (mention_idx, orig_pos, path)
         # Pass 1: title+year (precise)
         for i, r in enumerate(display_results):
             pos = i + 1
@@ -523,7 +563,7 @@ class ActionExecutor:
                 idx = response_lower.find(f"{r.title.lower()} ({r.year})")
                 if idx >= 0:
                     title_year_matched.add(r.title.lower())
-                    matches.append((idx, poster_by_pos[pos]))
+                    matches.append((idx, pos, poster_by_pos[pos]))
         # Pass 2: title-only fallback (only for titles not already matched by year)
         for i, r in enumerate(display_results):
             pos = i + 1
@@ -534,13 +574,15 @@ class ActionExecutor:
                 continue  # already handled precisely by pass 1
             idx = response_lower.find(title_lower)
             if idx >= 0:
-                matches.append((idx, poster_by_pos[pos]))
+                matches.append((idx, pos, poster_by_pos[pos]))
 
         if not matches:
-            return raw_posters  # fallback: can't determine, send all
+            # fallback: can't determine, send all
+            return raw_posters, {pos for pos, _ in raw_posters}
         # Sort by mention position so poster order matches LLM's text
         matches.sort(key=lambda x: x[0])
-        return [(i + 1, path) for i, (_, path) in enumerate(matches)]
+        renumbered = [(i + 1, path) for i, (_, _, path) in enumerate(matches)]
+        return renumbered, {pos for _, pos, _ in matches}
 
     async def _store_request_context(
         self, sender_phone: str, title: str, decision: LLMDecision

@@ -212,7 +212,9 @@ end tell
     @staticmethod
     def _sanitize_phone(phone: str) -> str:
         """Validate phone is a safe format for AppleScript interpolation."""
-        if not re.match(r"^[\+\d@.\w-]+$", phone):
+        # fullmatch, not match+$ — `$` alone accepts a trailing newline,
+        # which would land raw inside the AppleScript string literal
+        if not re.fullmatch(r"[\+\d@.\w-]+", phone):
             raise ValueError(f"Invalid phone format: {phone}")
         return phone
 

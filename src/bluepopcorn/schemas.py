@@ -36,11 +36,16 @@ RESPOND_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["reply", "request"],
+            # "search" is a deliberate escape hatch: the dedup instruction
+            # tells the LLM to re-search when the request check resolved
+            # the wrong title, and _llm_respond honors it (bounded by the
+            # same-turn dedup + MAX_SEARCHES_PER_TURN guards).
+            "enum": ["reply", "request", "search"],
         },
         "tmdb_id": {"type": "integer"},
         "media_type": {"type": "string", "enum": ["movie", "tv"]},
         "message": {"type": "string"},
+        "query": {"type": "string"},
         "seasons": {"type": "array", "items": {"type": "integer"}},
         "collection_id": {"type": "integer"},
         "multiple_results": {"type": "boolean"},

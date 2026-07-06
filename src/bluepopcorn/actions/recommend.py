@@ -43,7 +43,7 @@ async def handle_recommend(
             sender_phone, want_type, shown_ids,
         )
 
-    take = min(decision.count or 5, 10)  # LLM-controlled, capped at 10
+    take = max(1, min(decision.count or 5, 10))  # LLM-controlled, clamped to 1-10
     label = (
         (decision.genre.lower().strip() if decision.genre else None)
         or (decision.keyword.strip() if decision.keyword else None)
@@ -104,10 +104,14 @@ async def _handle_similar(
     want_type: str | None, shown_ids: set[int],
 ) -> str:
     """Handle 'similar to X' / 'something like X' recommendations."""
-    results, base_title = await find_similar(
-        executor.seerr, title,
-        media_type=want_type, exclude_ids=shown_ids,
-    )
+    try:
+        results, base_title = await find_similar(
+            executor.seerr, title,
+            media_type=want_type, exclude_ids=shown_ids,
+        )
+    except Exception as e:
+        log.error("Similar-to lookup failed: %s", e)
+        return ERROR_GENERIC
 
     if base_title is None:
         executor._add_context(sender_phone, CONTEXT_SIMILAR_NOT_FOUND.format(title=title))

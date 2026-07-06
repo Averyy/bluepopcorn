@@ -75,8 +75,13 @@ def load_settings(
     config_path: str = "imessage/config.toml",
 ) -> Settings:
     """Load settings from .env and config.toml."""
-    # Load .env
-    env = dotenv_values(env_path)
+    # Load .env (resolve relative paths against project root, same as
+    # config.toml — a CWD-relative .env silently loads nothing when run
+    # from another directory)
+    env_file = Path(env_path)
+    if not env_file.is_absolute():
+        env_file = PROJECT_ROOT / env_file
+    env = dotenv_values(env_file)
 
     # Load config.toml (resolve relative paths against project root)
     config_file = Path(config_path)

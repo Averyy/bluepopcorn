@@ -25,7 +25,7 @@ from .sender import MessageSender
 from .types import IncomingMessage
 from .prompts import ERROR_AUTH, ERROR_GENERIC
 from .request_tracker import RequestTracker
-from .utils import mask_phone, safe_data_path
+from .utils import atomic_tmp_path, mask_phone, safe_data_path
 from .watcher import ChatDBWatcher
 from .webhooks import WebhookServer
 
@@ -50,7 +50,7 @@ def _write_last_rowid(rowid: int) -> None:
     if _last_rowid_path is None:
         raise RuntimeError("_last_rowid_path not initialized — run_daemon() must be called first")
     _last_rowid_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _last_rowid_path.with_suffix(".tmp")
+    tmp = atomic_tmp_path(_last_rowid_path)
     try:
         tmp.write_text(str(rowid))
         tmp.rename(_last_rowid_path)
@@ -101,7 +101,7 @@ def _save_last_digest(data_dir: Path, sender: str, text: str) -> None:
     # Strip angle brackets — this text is re-injected into the next prompt
     sanitized = text.replace("<", "").replace(">", "")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_suffix(".tmp")
+    tmp = atomic_tmp_path(path)
     try:
         tmp.write_text(sanitized)
         tmp.chmod(0o600)
@@ -148,7 +148,11 @@ async def _send_digest_to_all(
             if text is None:
                 on_skip(phone)
                 continue
-            await msg_sender.send_text(phone, text)
+            if not await msg_sender.send_text(phone, text):
+                # Don't persist an undelivered digest — saving it would
+                # make tomorrow's dedup suppress the same content forever.
+                on_error(phone, RuntimeError("send_text failed (see sender log)"))
+                continue
             _save_last_digest(data_dir, phone, text)
             on_send(phone, text)
             if suggested and on_suggested is not None:
@@ -223,19 +227,39 @@ async def run_daemon(settings: Settings) -> None:
     else:
         log.info("Resuming from ROWID %d", last_rowid)
 
-    # Webhook server for Seerr notifications
-    async def send_notification(message: str, target_phone: str | None = None) -> None:
+    # Webhook server for Seerr notifications. Returns True when the
+    # notification was delivered (or queued for after quiet hours) so the
+    # webhook can decide whether to drop its tracker entry.
+    pending_notifications: list[tuple[str, str | None]] = []
+
+    async def send_notification(message: str, target_phone: str | None = None) -> bool:
         if _is_quiet_hours(settings):
-            log.info("Quiet hours — skipping webhook notification: %s", message[:80])
-            return
+            pending_notifications.append((message, target_phone))
+            log.info("Quiet hours — queued webhook notification: %s", message[:80])
+            return True
         if target_phone:
             if target_phone in settings.allowed_senders:
-                await sender.send_text(target_phone, message)
-            else:
-                log.warning("Skipping notification for stale phone %s", mask_phone(target_phone))
-        else:
-            for phone in settings.allowed_senders:
-                await sender.send_text(phone, message)
+                return await sender.send_text(target_phone, message)
+            # Stale phone can never be delivered — report handled so the
+            # tracker entry doesn't linger forever.
+            log.warning("Skipping notification for stale phone %s", mask_phone(target_phone))
+            return True
+        ok = True
+        for phone in settings.allowed_senders:
+            ok = await sender.send_text(phone, message) and ok
+        return ok
+
+    async def drain_pending_notifications() -> None:
+        """Deliver notifications queued during quiet hours."""
+        queued = list(pending_notifications)
+        pending_notifications.clear()
+        log.info("Delivering %d notification(s) queued during quiet hours", len(queued))
+        for message, target in queued:
+            try:
+                if not await send_notification(message, target):
+                    log.error("Deferred notification failed to send: %s", message[:80])
+            except Exception as e:
+                log.error("Deferred notification error: %s", e)
 
     webhook_server = WebhookServer(settings, on_notification=send_notification, request_tracker=request_tracker)
     await webhook_server.start()
@@ -280,7 +304,7 @@ async def run_daemon(settings: Settings) -> None:
     try:
         while not shutdown.is_set():
             try:
-                messages = await monitor.get_new_messages(last_rowid)
+                messages, scanned_rowid = await monitor.get_new_messages(last_rowid)
                 consecutive_errors = 0  # Reset on success
             except Exception as e:
                 consecutive_errors += 1
@@ -291,11 +315,11 @@ async def run_daemon(settings: Settings) -> None:
                 await asyncio.sleep(backoff)
                 continue
 
-            # Advance cursor for all messages
-            for msg in messages:
-                if msg.rowid > last_rowid:
-                    last_rowid = msg.rowid
-                    _write_last_rowid(last_rowid)
+            # Advance cursor past everything scanned (including filtered
+            # rows — otherwise they're re-parsed every poll)
+            if scanned_rowid > last_rowid:
+                last_rowid = scanned_rowid
+                _write_last_rowid(last_rowid)
 
             # Group by sender, keep only the latest message per sender
             latest_by_sender: dict[str, IncomingMessage] = {}
@@ -312,6 +336,10 @@ async def run_daemon(settings: Settings) -> None:
                     _process_message(msg, lock, executor, sender, settings, monitor)
                 )
                 _track_task(task)
+
+            # Deliver notifications held back by quiet hours
+            if pending_notifications and not _is_quiet_hours(settings):
+                _track_task(asyncio.create_task(drain_pending_notifications()))
 
             await watcher.wait(settings.poll_interval)
 
@@ -338,7 +366,7 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
         # Debounce: wait and check for newer messages from same sender
         await asyncio.sleep(settings.debounce_delay)
         try:
-            newer = await monitor.get_new_messages(msg.rowid)
+            newer, _scanned = await monitor.get_new_messages(msg.rowid)
             newer_from_same = [m for m in newer if m.sender == msg.sender]
             if newer_from_same:
                 log.debug("Skipping debounced message from %s", mask_phone(msg.sender))
@@ -353,7 +381,8 @@ async def _process_message(msg, lock, executor, sender, settings, monitor):
             response = await executor.handle_message(msg.sender, msg.text)
             await sender.stop_typing()
             log.info("OUT %s: %s", mask_phone(msg.sender), response[:200])
-            await sender.send_text(msg.sender, response)
+            if not await sender.send_text(msg.sender, response):
+                log.error("Failed to deliver reply to %s", mask_phone(msg.sender))
         except LLMAuthError as e:
             log.error("Auth error for %s: %s", mask_phone(msg.sender), e)
             await sender.stop_typing()
@@ -384,7 +413,12 @@ async def _check_accessibility() -> None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.warning("Accessibility check timed out — System Events unresponsive; continuing startup")
+        return
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="ignore").strip()
         log.warning("Accessibility not granted yet: %s", err)
@@ -435,7 +469,14 @@ async def _schedule_digest(
         wait_seconds = (target - now).total_seconds()
         log.info("Next digest at %s (in %.0f seconds)", target, wait_seconds)
 
-        await asyncio.sleep(wait_seconds)
+        # Sleep in short increments and re-check the wall clock — asyncio's
+        # monotonic clock does not advance during system sleep, so a single
+        # long sleep fires hours late after the Mac sleeps overnight.
+        while True:
+            remaining = (target - datetime.datetime.now(tz)).total_seconds()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 300))
 
         try:
             digest = MorningDigest(settings, seerr, llm, memory)

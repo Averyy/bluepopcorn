@@ -25,7 +25,7 @@ async def handle_recent(
 ) -> str:
     """Fetch server state (available + requested) and let the LLM present it."""
     try:
-        page = decision.page or 1
+        page = max(1, min(decision.page or 1, 100))  # clamp LLM-provided value
         data = await executor.seerr.get_server_state(page=page)
 
         available = data.get("available", [])
@@ -52,7 +52,7 @@ async def handle_recent(
                 lines.append(format_result_line(
                     i, item["title"], item.get("year"), item["media_type"],
                     item["tmdb_id"], item.get("overview", ""),
-                    status_label_for(item["status"]),
+                    status_label_for(item["status"], item.get("download_progress")),
                 ))
 
         lines.append(CONTEXT_RECENT_FOOTER)

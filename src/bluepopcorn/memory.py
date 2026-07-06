@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from .config import Settings
-from .utils import mask_phone
+from .utils import atomic_tmp_path, mask_phone
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class UserMemory:
     def _atomic_write(self, path: Path, content: str) -> None:
         """Write to temp file then rename (atomic on POSIX)."""
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = path.with_suffix(".tmp")
+        tmp = atomic_tmp_path(path)
         try:
             tmp.write_text(content)
             tmp.chmod(0o600)

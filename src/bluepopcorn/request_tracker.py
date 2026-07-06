@@ -34,7 +34,7 @@ class RequestTracker:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
+        tmp = atomic_tmp_path(self._path)
         try:
             tmp.write_text(json.dumps(self._data))
             tmp.rename(self._path)

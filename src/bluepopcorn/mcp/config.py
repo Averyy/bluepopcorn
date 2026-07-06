@@ -19,6 +19,9 @@ class Config:
     http_timeout: int = 15
     min_rating_votes: int = 50
     api_key: str | None = None  # MCP_API_KEY for Bearer auth
+    # Honor X-Forwarded-For only when explicitly behind a trusted reverse
+    # proxy — the header is client-controlled otherwise.
+    trust_proxy: bool = False
 
 
 def _int(key: str, default: int) -> int:
@@ -56,4 +59,5 @@ def load_config() -> Config:
         http_timeout=_int("HTTP_TIMEOUT", 15),
         min_rating_votes=_int("MIN_RATING_VOTES", 50),
         api_key=os.environ.get("MCP_API_KEY"),
+        trust_proxy=os.environ.get("MCP_TRUST_PROXY", "").lower() in ("1", "true", "yes"),
     )

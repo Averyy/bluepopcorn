@@ -11,6 +11,7 @@ import aiosqlite
 
 from .config import Settings
 from .types import HistoryEntry, IncomingMessage
+from .utils import mask_phone
 
 log = logging.getLogger(__name__)
 
@@ -158,17 +159,24 @@ class MessageMonitor:
             await self._db.close()
             self._db = None
 
-    async def get_new_messages(self, after_rowid: int) -> list[IncomingMessage]:
+    async def get_new_messages(self, after_rowid: int) -> tuple[list[IncomingMessage], int]:
         """Poll chat.db for new incoming messages after the given ROWID.
+
+        Returns ``(messages, max_scanned_rowid)`` — the second value lets
+        the caller advance its cursor past filtered rows (non-allowed
+        senders, empty text) so they aren't re-scanned every poll.
 
         Filters:
         - is_from_me = 0 (incoming only)
         - item_type = 0 (regular messages, not reactions/edits)
+        - 1:1 chats only (chat_identifier = handle id) — a message an
+          allowed sender posts in a group chat must not be treated as a
+          bot command; replies would go to the DM with mismatched history
         - Joins handle table for sender phone/email
         """
         db = await self._get_db()
         query = """
-            SELECT
+            SELECT DISTINCT
                 m.ROWID,
                 h.id AS sender,
                 m.text,
@@ -176,14 +184,18 @@ class MessageMonitor:
                 m.date
             FROM message m
             JOIN handle h ON m.handle_id = h.ROWID
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            JOIN chat c ON cmj.chat_id = c.ROWID
             WHERE m.ROWID > ?
               AND m.is_from_me = 0
               AND m.item_type = 0
+              AND c.chat_identifier = h.id
             ORDER BY m.ROWID ASC
         """
         async with db.execute(query, (after_rowid,)) as cursor:
             rows = await cursor.fetchall()
 
+        max_scanned = max((row[0] for row in rows), default=after_rowid)
         messages: list[IncomingMessage] = []
         for row in rows:
             rowid, sender, text, attr_body, date_val = row
@@ -197,7 +209,7 @@ class MessageMonitor:
 
             # Filter to allowed senders
             if sender not in self.allowed_senders:
-                log.debug("Ignoring message from non-allowed sender: %s", sender)
+                log.debug("Ignoring message from non-allowed sender: %s", mask_phone(sender))
                 continue
 
             timestamp = cf_to_unix(date_val) if date_val else 0.0
@@ -213,7 +225,7 @@ class MessageMonitor:
 
         if messages:
             log.info("Found %d new messages", len(messages))
-        return messages
+        return messages, max_scanned
 
     async def get_recent_messages(
         self,
@@ -229,6 +241,9 @@ class MessageMonitor:
         db = await self._get_db()
         cutoff_cf = unix_to_cf(time.time() - since_hours * 3600)
 
+        # DESC + reverse so the LIMIT keeps the NEWEST rows in the window —
+        # ASC + LIMIT would keep the oldest and silently drop the current
+        # conversation once a busy day exceeds the row budget.
         query = """
             SELECT m.ROWID, m.text, m.attributedBody, m.is_from_me, m.date
             FROM message m
@@ -237,12 +252,13 @@ class MessageMonitor:
             WHERE c.chat_identifier = ?
               AND m.item_type = 0
               AND m.date > ?
-            ORDER BY m.date ASC
+            ORDER BY m.date DESC
             LIMIT ?
         """
         # Fetch extra rows to account for noise filtering + dedup
         async with db.execute(query, (sender, cutoff_cf, limit * 3)) as cursor:
             rows = await cursor.fetchall()
+        rows = list(reversed(rows))
 
         entries = _dedup_chunked(_rows_to_entries(rows))[-limit:]
         log.debug(

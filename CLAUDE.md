@@ -88,7 +88,6 @@ User text → Haiku (action) → Python executes API → store results as contex
 
 LLM calls use the Anthropic SDK directly when `ANTHROPIC_API_KEY` is set (production), or fall back to `claude -p` subprocess (testing only — requires daily manual OAuth login). The SDK path uses tool_use for structured output enforcement. Custom exception `LLMAuthError` propagates auth failures distinctly from transient errors.
 
-Only exception: bypass commands (status/help/new) use Python responses directly.
 
 ## File Layout
 

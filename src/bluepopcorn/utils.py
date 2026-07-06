@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# Trailing "(YYYY)" — "Title (2013)" and "Title" are the same search for
+# dedup purposes (the request fallback strips the year before querying).
+_TRAILING_YEAR_RE = re.compile(r"\s*\(\d{4}\)\s*$")
 
 
 def mask_phone(phone: str) -> str:
@@ -10,9 +15,26 @@ def mask_phone(phone: str) -> str:
     return f"***{phone[-4:]}" if len(phone) >= 4 else "***"
 
 
-def normalize_search_query(query: str) -> str:
-    """Normalize a search query for same-turn dedup: collapse whitespace, casefold."""
-    return " ".join((query or "").split()).casefold()
+def normalize_search_query(query: str, media_type: str | None = None) -> str:
+    """Normalize a search query for same-turn dedup.
+
+    Strips a trailing "(YYYY)", collapses whitespace, casefolds. When
+    ``media_type`` is given it is folded into the key so a legitimate
+    movie-vs-tv refinement of the same title is not treated as a repeat.
+    """
+    stripped = _TRAILING_YEAR_RE.sub("", query or "").strip() or (query or "")
+    norm = " ".join(stripped.split()).casefold()
+    return f"{media_type}:{norm}" if media_type else norm
+
+
+def atomic_tmp_path(path: Path) -> Path:
+    """Sibling temp path for atomic writes.
+
+    NOT ``with_suffix(".tmp")`` — that strips everything after the last
+    dot, so email-derived filenames ("digest_a@x.com" / "digest_a@x.org")
+    would collide on the same temp file.
+    """
+    return path.parent / (path.name + ".tmp")
 
 
 def safe_sender_filename(sender: str) -> str:

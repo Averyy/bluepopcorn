@@ -339,15 +339,46 @@ def create_server(config: Config, seerr: SeerrClient) -> Server:
                         status = MediaStatus.UNKNOWN
                     if status in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE,
                                   MediaStatus.PROCESSING, MediaStatus.PENDING):
-                        d = {
-                            "already_exists": True,
-                            "title": title,
-                            "status": status_label_for(status),
-                            "tmdb_id": tmdb_id,
-                            "media_type": media_type,
-                        }
-                        content = json.dumps(d)
-                        return _format_result("seerr_request", {"content": content}, start_time)
+                        # For TV with explicit seasons, dedup per season —
+                        # requesting S3 of a show that has S1-2 is the most
+                        # common real request and must not be blocked just
+                        # because the show is tracked.
+                        if media_type == "tv" and requested_seasons and seasons:
+                            tracked_states = {}
+                            for s in media_info.get("seasons", []):
+                                try:
+                                    tracked_states[s.get("seasonNumber")] = MediaStatus(s.get("status", 0))
+                                except ValueError:
+                                    tracked_states[s.get("seasonNumber")] = MediaStatus.UNKNOWN
+                            already = (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE,
+                                       MediaStatus.PROCESSING, MediaStatus.PENDING)
+                            missing = [
+                                num for num in seasons
+                                if tracked_states.get(num, MediaStatus.NOT_TRACKED) not in already
+                            ]
+                            if missing:
+                                seasons = missing  # request only untracked seasons
+                            else:
+                                d = {
+                                    "already_exists": True,
+                                    "title": title,
+                                    "status": status_label_for(status),
+                                    "seasons": requested_seasons,
+                                    "tmdb_id": tmdb_id,
+                                    "media_type": media_type,
+                                }
+                                content = json.dumps(d)
+                                return _format_result("seerr_request", {"content": content}, start_time)
+                        else:
+                            d = {
+                                "already_exists": True,
+                                "title": title,
+                                "status": status_label_for(status),
+                                "tmdb_id": tmdb_id,
+                                "media_type": media_type,
+                            }
+                            content = json.dumps(d)
+                            return _format_result("seerr_request", {"content": content}, start_time)
         except SeerrConnectionError:
             raise  # Connection failed — don't attempt the request
         except Exception as e:
@@ -458,7 +489,7 @@ def create_server(config: Config, seerr: SeerrClient) -> Server:
                     "year": item.get("year"),
                     "media_type": item["media_type"],
                     "tmdb_id": item["tmdb_id"],
-                    "status": status_label_for(item["status"]),
+                    "status": status_label_for(item["status"], item.get("download_progress")),
                     "requested_at": item.get("requested_at", ""),
                 }
                 for item in requested

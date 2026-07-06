@@ -76,6 +76,14 @@ class SeerrConnectionError(SeerrError):
     """HTTP connection failed or timed out."""
 
 
+class SeerrAPIError(SeerrError):
+    """Seerr returned a non-404 HTTP error status."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class SeerrSearchError(SeerrError):
     """Search query returned an error (e.g. 400 bad query)."""
 
@@ -109,10 +117,16 @@ class SeerrClient:
         # Dynamic genre maps, loaded lazily
         self._genre_map_movie: dict[str, int] | None = None
         self._genre_map_tv: dict[str, int] | None = None
-        # Detail cache: (media_type, tmdb_id) -> {title, year, overview, poster_path, ts}
-        # TMDB metadata never changes — 2-week TTL. Status is NOT cached (comes from list endpoints).
-        self._detail_cache: dict[tuple[str, int], dict] = {}
-        self._detail_cache_ttl = 14 * 86400  # 2 weeks
+        self._genre_load_lock = asyncio.Lock()
+        # Detail cache: ("full", media_type, tmdb_id) -> full detail JSON.
+        # Immutable metadata (title/year/overview/poster/trailer) tolerates
+        # the long TTL. Volatile fields (download progress, next air date,
+        # mediaInfo status) must be read with the short max_age —
+        # get_detail_extras does this. Size-bounded for the long-lived daemon.
+        self._detail_cache: dict[tuple[str, str, int], dict] = {}
+        self._detail_cache_ttl = 14 * 86400  # 2 weeks (immutable metadata)
+        self._detail_cache_ttl_volatile = 300  # 5 min (status / air-date reads)
+        self._detail_cache_max = 500
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Make an API-key-authenticated request.
@@ -138,29 +152,43 @@ class SeerrClient:
 
         if resp.status_code >= 400 and resp.status_code != 404:
             log.error("HTTP %d on %s %s: %s", resp.status_code, method, path, resp.text[:200])
+            # Typed error so callers report "Seerr API error", not a raw
+            # httpx exception that generic handlers misreport.
+            raise SeerrAPIError(
+                f"Seerr API error {resp.status_code} ({method} {path})",
+                resp.status_code,
+            )
+        # 404 still surfaces as httpx.HTTPStatusError — callers treat it
+        # as "not found", which is genuinely different from an API error.
         resp.raise_for_status()
         return resp
 
     # --- Genre Loading ---
 
     async def _load_genres(self) -> None:
-        """Load genre mappings from Seerr API."""
-        try:
-            movie_resp, tv_resp = await asyncio.gather(
-                self._request("GET", "/api/v1/genres/movie", params={"language": "en"}),
-                self._request("GET", "/api/v1/genres/tv", params={"language": "en"}),
-            )
-            self._genre_map_movie = self._build_genre_map(movie_resp.json())
-            self._genre_map_tv = self._build_genre_map(tv_resp.json())
-            log.info(
-                "Loaded %d movie genres, %d TV genres",
-                len(self._genre_map_movie),
-                len(self._genre_map_tv),
-            )
-        except Exception as e:
-            log.warning("Failed to load genres from API, using empty maps: %s", e)
-            self._genre_map_movie = {}
-            self._genre_map_tv = {}
+        """Load genre mappings from Seerr API.
+
+        On failure the maps stay ``None`` so the next call retries — caching
+        empty maps would permanently kill genre discovery for the process
+        lifetime after one transient blip.
+        """
+        async with self._genre_load_lock:
+            if self._genre_map_movie is not None and self._genre_map_tv is not None:
+                return  # another caller loaded them while we waited
+            try:
+                movie_resp, tv_resp = await asyncio.gather(
+                    self._request("GET", "/api/v1/genres/movie", params={"language": "en"}),
+                    self._request("GET", "/api/v1/genres/tv", params={"language": "en"}),
+                )
+                self._genre_map_movie = self._build_genre_map(movie_resp.json())
+                self._genre_map_tv = self._build_genre_map(tv_resp.json())
+                log.info(
+                    "Loaded %d movie genres, %d TV genres",
+                    len(self._genre_map_movie),
+                    len(self._genre_map_tv),
+                )
+            except Exception as e:
+                log.warning("Failed to load genres from API (will retry on next use): %s", e)
 
     @staticmethod
     def _build_genre_map(genres: list[dict]) -> dict[str, int]:
@@ -306,12 +334,15 @@ class SeerrClient:
                 "GET", "/api/v1/search",
                 params={"query": query, "language": "en"},
             )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != 400:
-                raise SeerrSearchError(f"Search failed: {e}") from e
-            log.warning("Search returned 400, trying fallback queries")
         except SeerrConnectionError:
             raise
+        except SeerrAPIError as e:
+            if e.status_code != 400:
+                raise SeerrSearchError(f"Search failed: {e}") from e
+            log.warning("Search returned 400, trying fallback queries")
+        except httpx.HTTPStatusError as e:
+            # 404 from the search endpoint — treat like any other failure
+            raise SeerrSearchError(f"Search failed: {e}") from e
 
         # Fallback chain for 400 errors: no special chars → first 3 words → first 2 words
         words = query.split()
@@ -323,7 +354,7 @@ class SeerrClient:
                     "GET", "/api/v1/search",
                     params={"query": no_special, "language": "en"},
                 )
-            except httpx.HTTPStatusError:
+            except (SeerrAPIError, httpx.HTTPStatusError):
                 pass
 
         for length in (3, 2):
@@ -335,7 +366,7 @@ class SeerrClient:
                         "GET", "/api/v1/search",
                         params={"query": short, "language": "en"},
                     )
-                except httpx.HTTPStatusError:
+                except (SeerrAPIError, httpx.HTTPStatusError):
                     continue
 
         raise SeerrSearchError(f"All search attempts failed for: {query}")
@@ -407,15 +438,16 @@ class SeerrClient:
     async def get_media_status(self, media_type: str, tmdb_id: int) -> dict | None:
         """Get current status of a media item. Returns detail dict or None.
 
-        Raises SeerrConnectionError so callers can distinguish "not found" from "unreachable".
+        Returns ``None`` only for a genuine 404 (title not found). Connection
+        errors and non-404 API errors propagate — a Seerr 500 must not be
+        reported to the user as "title not found".
         """
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             return resp.json()
-        except SeerrConnectionError:
-            raise
-        except (SeerrError, httpx.HTTPStatusError) as e:
-            log.debug("Media status check failed for %s/%d: %s", media_type, tmdb_id, e)
+        except httpx.HTTPStatusError:
+            # Only 404 surfaces as HTTPStatusError from _request
+            log.debug("Media status: %s/%d not found", media_type, tmdb_id)
             return None
 
     async def get_request_count(self) -> dict:
@@ -504,7 +536,12 @@ class SeerrClient:
             "trailer": None, "air_date": None, "download_progress": None,
             "collection_id": None, "collection_name": None, "season_count": None,
         }
-        data = await self._fetch_detail(media_type, tmdb_id)
+        # Short max_age: air_date and download_progress go stale in minutes,
+        # not weeks — serving the 14-day cache reported episodes as "airing"
+        # long after they aired.
+        data = await self._fetch_detail(
+            media_type, tmdb_id, max_age=self._detail_cache_ttl_volatile
+        )
         if not data:
             return _empty
         media_info = data.get("mediaInfo") or {}
@@ -572,16 +609,32 @@ class SeerrClient:
             release = data.get("releaseDate", "")
             return release or None
 
-    async def _fetch_detail(self, media_type: str, tmdb_id: int) -> dict | None:
-        """Fetch full detail JSON with caching. Returns full API response or None."""
+    async def _fetch_detail(
+        self, media_type: str, tmdb_id: int, max_age: float | None = None
+    ) -> dict | None:
+        """Fetch full detail JSON with caching. Returns full API response or None.
+
+        ``max_age`` overrides the default TTL — pass a short value when the
+        caller reads volatile fields (download progress, air dates).
+        """
         cache_key = ("full", media_type, tmdb_id)
+        ttl = self._detail_cache_ttl if max_age is None else max_age
         cached = self._detail_cache.get(cache_key)
-        if cached and time.time() - cached.get("_cache_ts", 0) < self._detail_cache_ttl:
+        if cached and time.time() - cached.get("_cache_ts", 0) < ttl:
             return cached
         try:
             resp = await self._request("GET", f"/api/v1/{media_type}/{tmdb_id}")
             detail = resp.json()
             detail["_cache_ts"] = time.time()
+            if len(self._detail_cache) >= self._detail_cache_max:
+                # Evict the oldest tenth — keeps memory bounded without
+                # tracking LRU order
+                oldest = sorted(
+                    self._detail_cache,
+                    key=lambda k: self._detail_cache[k].get("_cache_ts", 0),
+                )
+                for key in oldest[: max(1, self._detail_cache_max // 10)]:
+                    del self._detail_cache[key]
             self._detail_cache[cache_key] = detail
             return detail
         except Exception:
@@ -715,6 +768,7 @@ class SeerrClient:
                 "overview": detail["overview"],
                 "status": status,
                 "tmdb_id": tmdb_id,
+                "download_progress": parse_download_progress(media),
                 "requested_at": req.get("createdAt", ""),
             }
 
@@ -859,6 +913,11 @@ class SeerrClient:
             if cid and cid not in seen_ids:
                 seen_ids.add(cid)
                 filtered.append(credit)
+
+        # Apply the requested type BEFORE truncation — otherwise popular TV
+        # credits crowd movie credits out of the take=N slots (and vice versa)
+        if want_type:
+            filtered = [c for c in filtered if c.get("mediaType") == want_type]
 
         filtered.sort(key=lambda x: x.get("popularity", 0), reverse=True)
         results = self._parse_results(

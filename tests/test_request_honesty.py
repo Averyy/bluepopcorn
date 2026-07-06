@@ -277,7 +277,7 @@ async def run_dedup_case(
     executor._cli_history.pop(TEST_SENDER, None)
     executor._last_topic.pop(TEST_SENDER, None)
     executor._prompt_cache.pop(TEST_SENDER, None)
-    executor._prompt_cache_ctx_count.pop(TEST_SENDER, None)
+    executor._prompt_cache_ctx_ts.pop(TEST_SENDER, None)
     seed_memory(memory)
     seed_conversation(executor)
 

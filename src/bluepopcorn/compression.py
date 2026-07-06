@@ -19,7 +19,7 @@ from .llm import LLMAuthError, LLMClient
 from .memory import UserMemory
 from .monitor import MessageMonitor
 from .prompts import COMPRESS_DAILY_PROMPT, COMPRESS_MONTHLY_PROMPT, COMPRESS_WEEKLY_PROMPT
-from .utils import mask_phone, safe_data_path
+from .utils import atomic_tmp_path, mask_phone, safe_data_path
 from .schemas import COMPRESSION_SCHEMA, ROLLUP_SCHEMA
 from .types import HistoryEntry
 
@@ -56,7 +56,7 @@ class Compressor:
         """Write the last compression date for a sender."""
         path = self._last_compressed_path(sender)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = atomic_tmp_path(path)
         try:
             tmp.write_text(date.isoformat())
             tmp.rename(path)

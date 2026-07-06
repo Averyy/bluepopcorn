@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .seerr import SeerrClient, SeerrError
+from .seerr import SeerrClient, SeerrConnectionError, SeerrError
 from .types import SearchResult
 
 log = logging.getLogger(__name__)
@@ -135,6 +135,18 @@ async def discover_recommendations(
                 take=7, exclude_ids=exclude,
             )
 
+    # Year-only discover — criteria validation accepts a bare year, so
+    # without this strategy a year-only recommend always returned empty
+    if (year or year_end) and not keyword_ids and not genre_keyword and not trending and not upcoming:
+        if media_type != "tv":
+            coros["year_movie"] = seerr.discover_movies(
+                year=year, year_end=year_end, take=take, exclude_ids=exclude,
+            )
+        if media_type != "movie":
+            coros["year_tv"] = seerr.discover_tv(
+                year=year, year_end=year_end, take=take, exclude_ids=exclude,
+            )
+
     if trending:
         coros["trending"] = seerr.discover_trending(take=take, exclude_ids=exclude)
 
@@ -162,14 +174,24 @@ async def discover_recommendations(
     # Combine & dedupe by tmdb_id, preserving priority order
     seen_ids: set[int] = set(exclude)
     combined: list[SearchResult] = []
+    failures = 0
+    connection_error: SeerrConnectionError | None = None
     for key, val in zip(keys, values):
         if isinstance(val, Exception):
             log.warning("Recommend strategy '%s' failed: %s", key, val)
+            failures += 1
+            if isinstance(val, SeerrConnectionError):
+                connection_error = val
             continue
         for r in val:
             if r.tmdb_id not in seen_ids:
                 seen_ids.add(r.tmdb_id)
                 combined.append(r)
+
+    # If nothing succeeded and Seerr was unreachable, don't report
+    # "no recommendations found" — that's a factual misreport of an outage.
+    if failures == len(keys) and connection_error is not None:
+        raise connection_error
 
     # Post-filter by media type for mixed sources (trending, search)
     if media_type:
@@ -196,15 +218,19 @@ async def find_similar(
     exclude = exclude_ids or set()
 
     try:
-        search_results = await seerr.search(title)
+        search_results = await seerr.search(title, media_type=media_type)
         if not search_results:
             words = title.split()
             for n in range(min(len(words) - 1, 4), 0, -1):
                 shorter = " ".join(words[:n])
-                search_results = await seerr.search(shorter)
+                search_results = await seerr.search(shorter, media_type=media_type)
                 if search_results:
                     log.info("Similar-to fallback matched on: %s", shorter)
                     break
+    except SeerrConnectionError:
+        # Propagate — callers report "(title) not found" for an empty
+        # result, which is wrong when Seerr is simply unreachable.
+        raise
     except SeerrError as e:
         log.error("Similar-to search failed: %s", e)
         search_results = []
@@ -231,5 +257,12 @@ async def find_similar(
     except SeerrError as e:
         log.error("Recommendations/similar lookup failed: %s", e)
         results = []
+
+    # Honor the requested type — recommendations for a movie can include TV
+    # entries (and vice versa). Keep unfiltered as fallback if nothing matches.
+    if media_type:
+        typed = [r for r in results if r.media_type == media_type]
+        if typed:
+            results = typed
 
     return results[:take], base.title

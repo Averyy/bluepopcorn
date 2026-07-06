@@ -29,10 +29,10 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/path/to/bluepopcorn/bluepopcorn.log</string>
+    <string>/path/to/bluepopcorn/bluepopcorn.launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/path/to/bluepopcorn/bluepopcorn.log</string>
+    <string>/path/to/bluepopcorn/bluepopcorn.launchd.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

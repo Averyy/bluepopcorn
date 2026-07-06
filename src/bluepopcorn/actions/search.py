@@ -23,11 +23,6 @@ async def handle_search(
 ) -> str:
     """Execute a search action: search Seerr, LLM responds, THEN send poster."""
     query = decision.query or decision.message
-    # Record the query so _llm_respond / handle_request can refuse an
-    # identical re-search later in this turn (same-turn loop guard).
-    executor._searched_this_turn.setdefault(sender_phone, set()).add(
-        normalize_search_query(query)
-    )
     try:
         results = await executor.seerr.search(query, media_type=decision.media_type)
     except SeerrSearchError:
@@ -36,6 +31,14 @@ async def handle_search(
     except Exception as e:
         log.error("Search failed for '%s': %s", query, e)
         return ERROR_GENERIC
+
+    # Search completed (results or genuine 0) — record it so _llm_respond /
+    # handle_request refuse an identical re-search later this turn. Not
+    # registered on error above: a retry after a transient failure is
+    # legitimate, and forced_reply would misreport "not found".
+    executor._searched_this_turn.setdefault(sender_phone, set()).add(
+        normalize_search_query(query, decision.media_type)
+    )
 
     if not results:
         executor._add_context(sender_phone, CONTEXT_SEARCH_EMPTY.format(query=query))

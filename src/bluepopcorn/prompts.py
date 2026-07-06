@@ -13,27 +13,27 @@ Seerr media server control: search, discover, request movies and TV shows.
 
 seerr_search(query: string, media_type?: "movie"|"tv")
   Search by title. Fuzzy matching, year extraction, fallback chains.
-  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, poster_url, tmdb_rating, rt_rating, imdb_rating, trailer_url}], count}
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, poster_url?, tmdb_rating?, rt_rating?, imdb_rating?, trailer_url?, air_date?, download_progress?, season_count?, collection_id?, collection_name?}], count}
 
 seerr_details(tmdb_id: int, media_type: "movie"|"tv")
   Full info by TMDB ID. Ratings, trailer, seasons, collection, download progress.
   Returns: {tmdb_id, title, year, media_type, overview, status, genres, seasons, rt_critics, imdb_rating, trailer_url, download_progress}
 
 seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
-  Request download. Deduplicates. TV auto-fetches all seasons unless specified. Search first — never guess IDs.
-  Returns: {requested: true, title, tmdb_id} | {already_exists: true, title, status}
+  Request download. Deduplicates (per-season for TV when seasons given). TV auto-fetches all seasons unless specified. Search first — never guess IDs.
+  Returns: {requested: true, title, tmdb_id, media_type, request_id} | {already_exists: true, title, status, tmdb_id, media_type}
 
-seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, exclude_ids?: int[])
-  Discover by genre/keyword/similarity/trending. At least one param required. Compound genres work ("sci-fi comedy").
-  Returns: {results: [{tmdb_id, title, year, media_type, overview, status}], count}
+seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, year?: int, year_end?: int, count?: int, exclude_ids?: int[])
+  Discover by genre/keyword/similarity/trending/year. At least one criterion required. Compound genres work ("sci-fi comedy"). year/year_end give a range; count caps results (max 10).
+  Returns: {results: [{tmdb_id, title, year, media_type, overview, status, ...}], count} — similar_to adds {similar_to: base_title}
 
 seerr_recent(page?: int, limit?: int)
   Recent library additions and pending requests with download progress.
-  Returns: {page, available: [{title, year, media_type, tmdb_id, status}], requested: [...]}
+  Returns: {page, available: [{title, year, media_type, tmdb_id, status, added_at}], requested: [{title, year, media_type, tmdb_id, status, requested_at}]}
 
 ## Status Values
 
-"not in the library" | "available in library" | "partially available" | "requested: pending approval" | "currently downloading (X%)"
+"not in the library" | "available in library" | "partially available in library" | "requested: waiting for admin approval" | "requested: waiting for release" | "currently downloading (X%, ETA H:MM:SS)" | "blocked/unable to download"
 """
 
 # ── MCP server instructions (sent to MCP clients) ────────────────────
@@ -275,6 +275,10 @@ CONTEXT_SEASON_INVALID = '[Season selection: requested seasons {requested} not f
 CONTEXT_SEARCH_REPEAT = (
     '[Search for "{query}" already ran this turn — do not search again. '
     'Use the results (or lack of results) already shown above.]'
+)
+CONTEXT_SEARCH_BUDGET = (
+    '[Search limit reached for this turn — do not search again. '
+    'Reply using the results already shown above.]'
 )
 
 # ── Call-2 instructions (keyed by scenario) ───────────────────────────

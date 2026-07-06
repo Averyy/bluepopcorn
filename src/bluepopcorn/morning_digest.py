@@ -16,7 +16,7 @@ from .prompts import DIGEST_AUTH_FALLBACK, DIGEST_COMPOSE_PROMPT, DIGEST_FALLBAC
 from .schemas import DIGEST_SCHEMA
 from .seerr import SeerrClient
 from .types import MediaStatus
-from .utils import mask_phone, safe_data_path
+from .utils import atomic_tmp_path, mask_phone, safe_data_path
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,10 @@ def _match_trending_title(trending: str, message: str) -> int | None:
         raw_title = m.group(2).strip()
         # Strip year suffix like "(2024)" to get the bare title
         title = re.sub(r"\s*\(\d{4}\)$", "", raw_title)
-        if re.search(r"\b" + re.escape(title.lower()) + r"\b", msg_lower):
+        # Lookarounds instead of \b — \b can't match next to titles that
+        # start/end with non-word chars (e.g. "Them!", "#Alive")
+        pattern = r"(?<!\w)" + re.escape(title.lower()) + r"(?!\w)"
+        if re.search(pattern, msg_lower):
             return tmdb_id
     return None
 
@@ -232,7 +235,7 @@ class MorningDigest:
             ids.append(tmdb_id)
         if len(ids) > 100:
             ids = ids[-100:]
-        tmp = path.with_suffix(".tmp")
+        tmp = atomic_tmp_path(path)
         try:
             tmp.write_text("\n".join(str(i) for i in ids) + "\n")
             tmp.chmod(0o600)

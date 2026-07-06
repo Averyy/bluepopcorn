@@ -27,18 +27,22 @@ def timing_safe_compare(a: str | bytes, b: str | bytes) -> bool:
 _auth_failures: dict[str, tuple[int, float]] = {}
 _AUTH_MAX_FAILURES = 5
 _AUTH_COOLDOWN = 60  # seconds
+# Prune expired entries when the dict grows past this — without a sweep,
+# unauthenticated requests with unique (spoofed) IPs grow it forever.
+_AUTH_FAILURES_SWEEP_AT = 1024
 
 
 def verify_bearer_auth(
     request: Request,
     api_key_hashes: set[str],
+    trust_proxy: bool = False,
 ) -> str | None:
     """Verify Bearer token authentication.
 
     Returns error message if auth fails, None if successful.
     Applies per-IP rate limiting after repeated failures.
     """
-    client_ip = get_client_ip(request)
+    client_ip = get_client_ip(request, trust_proxy=trust_proxy)
 
     # Check rate limit
     if client_ip in _auth_failures:
@@ -73,15 +77,29 @@ def verify_bearer_auth(
 
 def _record_auth_failure(ip: str) -> None:
     """Record an auth failure for rate limiting."""
+    now = time.time()
+    if len(_auth_failures) >= _AUTH_FAILURES_SWEEP_AT:
+        for key in [k for k, (_, t) in _auth_failures.items() if now - t >= _AUTH_COOLDOWN]:
+            del _auth_failures[key]
     count, _ = _auth_failures.get(ip, (0, 0.0))
-    _auth_failures[ip] = (count + 1, time.time())
+    _auth_failures[ip] = (count + 1, now)
 
 
-def get_client_ip(request: Request) -> str:
-    """Get client IP from request, sanitized for safe logging."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-        # Sanitize: remove control chars to prevent log injection
-        return ip.translate(str.maketrans("", "", "\r\n\t\x00"))
+def get_client_ip(request: Request, trust_proxy: bool = False) -> str:
+    """Get client IP from request, sanitized for safe logging.
+
+    ``X-Forwarded-For`` is client-controlled, so it is honored only when
+    the operator explicitly declares a trusted reverse proxy in front
+    (``MCP_TRUST_PROXY``). Trusting it unconditionally lets attackers
+    dodge the auth rate limit with a random XFF per request — or lock
+    out a victim by spoofing the victim's IP. When trusted, the LAST
+    entry is used: it is the one appended by the proxy itself; earlier
+    entries are whatever the client sent.
+    """
+    if trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            ip = forwarded.split(",")[-1].strip()
+            # Sanitize: remove control chars to prevent log injection
+            return ip.translate(str.maketrans("", "", "\r\n\t\x00"))
     return request.client.host if request.client else "unknown"

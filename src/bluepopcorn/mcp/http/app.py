@@ -101,10 +101,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     # MCP endpoint (requires auth)
     @app.post("/mcp")
     async def mcp_endpoint(request: Request):
-        client_ip = get_client_ip(request)
+        client_ip = get_client_ip(request, trust_proxy=config.trust_proxy)
 
         # Verify authentication
-        auth_error = verify_bearer_auth(request, api_key_hashes)
+        auth_error = verify_bearer_auth(request, api_key_hashes, trust_proxy=config.trust_proxy)
         if auth_error:
             _log(f"Auth failed: {auth_error} from {client_ip}")
             return JSONResponse(
