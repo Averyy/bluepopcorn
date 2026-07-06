@@ -27,6 +27,18 @@ def normalize_search_query(query: str, media_type: str | None = None) -> str:
     return f"{media_type}:{norm}" if media_type else norm
 
 
+def neutralize_brackets(text: str) -> str:
+    """Replace square brackets with parens in user/third-party text.
+
+    Square brackets delimit prompt control markers ([INSTRUCTION: ...],
+    [Search results ...], [Last discussed title: ...]). Untrusted text —
+    user messages, TMDB titles/overviews — must not be able to forge
+    those markers. Applied at ingestion, never at render: context
+    entries contain OUR markers by the time they're rendered.
+    """
+    return (text or "").replace("[", "(").replace("]", ")")
+
+
 def atomic_tmp_path(path: Path) -> Path:
     """Sibling temp path for atomic writes.
 

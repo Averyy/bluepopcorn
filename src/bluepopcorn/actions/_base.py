@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from ..types import MediaStatus, SearchResult, status_label_for
+from ..utils import neutralize_brackets
 
 log = logging.getLogger(__name__)
 
@@ -20,10 +21,16 @@ def format_result_line(
     *,
     extras: str = "",
 ) -> str:
-    """Format a single result line in the shared context format."""
+    """Format a single result line in the shared context format.
+
+    Title and overview are third-party TMDB text — brackets are
+    neutralized so they can't forge the [Movie]/[TV] markers or other
+    prompt control blocks.
+    """
     year_str = f" ({year})" if year else ""
     type_str = "TV" if media_type == "tv" else "Movie"
-    overview = overview or "No description"
+    title = neutralize_brackets(title)
+    overview = neutralize_brackets(overview or "No description")
     return (
         f"{index}. {title}{year_str} [{type_str}] tmdb:{tmdb_id} "
         f"- {overview} (Status: {status_str}){extras}"
@@ -36,7 +43,7 @@ def format_search_results(results: list[SearchResult], query: str | None = None)
     Callers must check for empty results before calling — all call sites
     short-circuit to a specific CONTEXT_*_EMPTY string before reaching here.
     """
-    header = f"[Search results for '{query}':" if query else "[Search results:"
+    header = f"[Search results for '{neutralize_brackets(query)}':" if query else "[Search results:"
     lines = [header]
     for i, r in enumerate(results, 1):
         # Build extras suffix (ratings, air date, trailer)
@@ -52,7 +59,10 @@ def format_search_results(results: list[SearchResult], query: str | None = None)
         trailer_str = f" Trailer: {r.trailer_url}" if r.trailer_url else ""
         air_date_str = f" | Air date: {r.next_air_date}" if r.next_air_date else ""
         season_str = f" | {r.season_count} season{'s' if r.season_count != 1 else ''}" if r.season_count else ""
-        collection_str = f" | Collection: {r.collection_name} (id: {r.collection_id})" if r.collection_name else ""
+        collection_str = (
+            f" | Collection: {neutralize_brackets(r.collection_name)} (id: {r.collection_id})"
+            if r.collection_name else ""
+        )
         lines.append(format_result_line(
             i, r.title, r.year, r.media_type, r.tmdb_id, r.overview,
             status_label_for(r.status, r.download_progress),

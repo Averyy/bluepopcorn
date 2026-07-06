@@ -29,7 +29,7 @@ seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?
 
 seerr_recent(page?: int, limit?: int)
   Recent library additions and pending requests with download progress.
-  Returns: {page, available: [{title, year, media_type, tmdb_id, status, added_at}], requested: [{title, year, media_type, tmdb_id, status, requested_at}]}
+  Returns: {page, total_available, total_requested, available: [{title, year, media_type, tmdb_id, status, added_at}], requested: [{title, year, media_type, tmdb_id, status, requested_at}]}
 
 ## Status Values
 

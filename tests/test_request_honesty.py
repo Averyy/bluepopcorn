@@ -39,6 +39,7 @@ import asyncio
 import logging
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -465,6 +466,10 @@ async def main() -> None:
         sys.exit(2)
 
     settings = load_settings()
+    # Isolate test fixture data (memory files, digest state) from the
+    # production data/ dir — fixture users otherwise accumulate there
+    settings.data_dir = tempfile.mkdtemp(prefix="bluepopcorn-test-")
+    settings.memory_dir = settings.data_dir + "/memory"
     _setup_test_logging(settings, verbose=args.verbose, label="request-honesty")
 
     seerr = SeerrClient(settings)

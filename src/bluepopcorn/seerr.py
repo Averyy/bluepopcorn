@@ -707,11 +707,21 @@ class SeerrClient:
         )
 
         # --- Available items ---
+        available_json = available_resp.json()
         available_raw = [
-            item for item in available_resp.json().get("results", [])
+            item for item in available_json.get("results", [])
             if item.get("tmdbId") and item.get("mediaType")
             and item.get("status") in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE)
         ]
+
+        # Server-side totals so callers can paginate meaningfully — pages
+        # can come back short after client-side filtering, which otherwise
+        # looks identical to "past the end"
+        total_available = available_json.get("pageInfo", {}).get("results")
+        total_requested = sum(
+            resp.json().get("pageInfo", {}).get("results") or 0
+            for resp in (processing_resp, pending_resp)
+        )
 
         # --- Requested items (merge processing + pending) ---
         requested_raw: list[dict] = []
@@ -780,6 +790,8 @@ class SeerrClient:
         return {
             "available": list(available),
             "requested": list(requested),
+            "total_available": total_available,
+            "total_requested": total_requested,
         }
 
     def _parse_results(

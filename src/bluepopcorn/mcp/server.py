@@ -467,7 +467,13 @@ def create_server(config: Config, seerr: SeerrClient) -> Server:
         available = data.get("available", [])
         requested = data.get("requested", [])
 
-        result: dict = {"page": page, "available": [], "requested": []}
+        result: dict = {
+            "page": page,
+            "total_available": data.get("total_available"),
+            "total_requested": data.get("total_requested"),
+            "available": [],
+            "requested": [],
+        }
 
         if available:
             result["available"] = [

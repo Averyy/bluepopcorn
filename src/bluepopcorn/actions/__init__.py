@@ -31,7 +31,7 @@ from ..prompts import (
 )
 from ..schemas import RESPOND_SCHEMA, TAG_CONTEXT, TAG_MEMORY
 from ..types import Action, HistoryEntry, LLMDecision, SearchResult
-from ..utils import mask_phone, normalize_search_query
+from ..utils import mask_phone, neutralize_brackets, normalize_search_query
 
 # Handler imports
 from .search import handle_search
@@ -207,14 +207,17 @@ class ActionExecutor:
         # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
         # Mark the current message with a strong delimiter so the LLM focuses on it
-        # (chat.db history can be noisy with old conversations)
-        prompt += CURRENT_MESSAGE_DELIMITER.format(text=_escape_xml_delimiters(text))
+        # (chat.db history can be noisy with old conversations). Brackets are
+        # neutralized so the message can't forge [INSTRUCTION]-style markers.
+        prompt += CURRENT_MESSAGE_DELIMITER.format(
+            text=_escape_xml_delimiters(neutralize_brackets(text))
+        )
         # Inject last-discussed topic so the LLM knows what "it" refers to.
         # Skip if the topic itself is stale (older than the gap threshold) —
         # the chat.db gap marker handles older history independently.
         if self._topic_is_fresh(sender_phone):
             topic = self._last_topic[sender_phone]
-            safe_title = _escape_xml_delimiters(topic["title"])
+            safe_title = _escape_xml_delimiters(neutralize_brackets(topic["title"]))
             prompt += "\n" + LAST_DISCUSSED_TITLE.format(
                 title=safe_title, tmdb_id=topic["tmdb_id"], media_type=topic["media_type"],
             )
@@ -380,7 +383,9 @@ class ActionExecutor:
         # Per-user memory (markdown file) — run in thread to avoid blocking event loop
         memory_content = await asyncio.to_thread(self.memory.load, sender_phone)
         if memory_content:
-            safe_memory = _escape_xml_delimiters(memory_content.strip())
+            # Memory is LLM-compressed from user conversations — treat as
+            # untrusted for control markers, same as user text
+            safe_memory = _escape_xml_delimiters(neutralize_brackets(memory_content.strip()))
             parts.append(f"<{TAG_MEMORY}>\n{safe_memory}\n</{TAG_MEMORY}>")
 
         # Get messages: chat.db in daemon mode, _cli_history in CLI mode
@@ -412,11 +417,17 @@ class ActionExecutor:
             mask_phone(sender_phone), msg_count, ctx_count, bool(memory_content),
         )
 
-        # Render with gap markers for 2+ hour gaps
+        # Render with gap markers for 2+ hour gaps. User/assistant lines are
+        # untrusted (chat.db text) — neutralize brackets so history can't
+        # forge control markers. Context entries contain OUR markers and are
+        # already bracket-safe internally (third-party fields neutralized at
+        # ingestion in _base.py).
         prev_ts = 0.0
         for ts, tag, content in timeline:
             if prev_ts > 0 and ts - prev_ts >= gap_seconds:
                 parts.append(CONVERSATION_GAP)
+            if tag != TAG_CONTEXT:
+                content = neutralize_brackets(content)
             safe = _escape_xml_delimiters(content)
             parts.append(f"<{tag}>{safe}</{tag}>")
             prev_ts = ts
@@ -589,7 +600,8 @@ class ActionExecutor:
     ) -> None:
         """Store context about the requested/discussed title for future narrowing."""
         ctx = LAST_DISCUSSED_TITLE.format(
-            title=title, tmdb_id=decision.tmdb_id, media_type=decision.media_type,
+            title=neutralize_brackets(title),
+            tmdb_id=decision.tmdb_id, media_type=decision.media_type,
         )
         self._add_context(sender_phone, ctx)
         self.set_topic(sender_phone, title, decision.tmdb_id, decision.media_type)
@@ -604,7 +616,9 @@ class ActionExecutor:
         though older chat.db history has gaps before it).
         """
         self._last_topic[sender_phone] = {
-            "title": title,
+            # Titles come from Seerr/TMDB — neutralize so a title can't
+            # forge bracket markers when injected into the prompt
+            "title": neutralize_brackets(title),
             "tmdb_id": tmdb_id,
             "media_type": media_type,
             "set_ts": time.time(),

@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -715,6 +716,10 @@ async def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings()
+    # Isolate test fixture data (memory files, digest state) from the
+    # production data/ dir — fixture users otherwise accumulate there
+    settings.data_dir = tempfile.mkdtemp(prefix="bluepopcorn-test-")
+    settings.memory_dir = settings.data_dir + "/memory"
     _setup_test_logging(settings, verbose=args.verbose, label="conversations")
 
     seerr = SeerrClient(settings)
