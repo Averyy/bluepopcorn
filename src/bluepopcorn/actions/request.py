@@ -17,6 +17,7 @@ from ..prompts import (
     CONTEXT_COLLECTION_NONE,
     CONTEXT_COLLECTION_REQUESTED,
     CONTEXT_DEDUP,
+    CONTEXT_REQUEST_SUBMITTED,
     CONTEXT_SEARCH_EMPTY,
     CONTEXT_SEARCH_ERROR,
     CONTEXT_SEARCH_REPEAT,
@@ -210,6 +211,9 @@ async def handle_request(
                     sender_phone, CONTEXT_SEARCH_REPEAT.format(query=search_term)
                 )
                 return (await executor._llm_respond(sender_phone, scenario="forced_reply"))[0]
+            executor._search_attempts_this_turn[sender_phone] = (
+                executor._search_attempts_this_turn.get(sender_phone, 0) + 1
+            )
             try:
                 results = await executor.seerr.search(search_term)
                 # Completed — register for same-turn dedup (not on error:
@@ -302,7 +306,15 @@ async def handle_request(
             await executor.request_tracker.record(decision.media_type, decision.tmdb_id, sender_phone)
         if decision.message and decision.message.strip():
             return decision.message.strip()
-        # LLM omitted the confirmation text — craft one instead of texting nothing
+        # LLM omitted the confirmation text — craft one instead of texting
+        # nothing. Anchor the respond call with the outcome, or it has no
+        # evidence the request succeeded and can misdescribe it.
+        executor._add_context(
+            sender_phone,
+            CONTEXT_REQUEST_SUBMITTED.format(
+                title=title, tmdb_id=decision.tmdb_id, media_type=decision.media_type,
+            ),
+        )
         return (await executor._llm_respond(sender_phone, scenario="empty_reply"))[0]
     except Exception as e:
         log.error("Request failed (type=%s tmdb=%s): %s", decision.media_type, decision.tmdb_id, e)

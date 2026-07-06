@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from bluepopcorn.actions import ActionExecutor
 from bluepopcorn.prompts import ERROR_GENERIC
+from bluepopcorn.seerr import SeerrSearchError
 from bluepopcorn.types import Action, LLMDecision, MediaStatus, SearchResult
 
 SENDER = "+10000000000"
@@ -144,6 +145,26 @@ async def test_forced_reply_rejects_request_action():
 
     seerr.request_media.assert_not_awaited()
     assert response == ERROR_GENERIC
+
+
+@pytest.mark.asyncio
+async def test_failing_search_counts_toward_budget():
+    """A persistently erroring search can't loop past the attempt budget.
+
+    Failed queries stay out of the repeat set (retries are legitimate),
+    so the budget must count attempts — otherwise an always-failing
+    query re-opens the loop-to-cap path.
+    """
+    llm = MagicMock()
+    loop_decision = LLMDecision(action=Action.SEARCH, query="Cursed Title", message="searching")
+    llm.decide = AsyncMock(return_value=(loop_decision, {}))
+    seerr = _seerr()
+    seerr.search = AsyncMock(side_effect=SeerrSearchError("boom"))
+    ex = _executor(llm, seerr)
+
+    await ex.handle_message(SENDER, "cursed title")
+
+    assert seerr.search.await_count <= ActionExecutor.MAX_SEARCHES_PER_TURN
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,8 @@ import json
 import logging
 from pathlib import Path
 
+from .utils import atomic_tmp_path
+
 log = logging.getLogger(__name__)
 
 

@@ -102,6 +102,11 @@ class ActionExecutor:
         # in context — and identical prompts make the LLM repeat the same
         # decision until MAX_LLM_CALLS_PER_TURN aborts the turn.
         self._searched_this_turn: dict[str, set[str]] = {}
+        # Search ATTEMPTS this turn (including failed ones). Failed queries
+        # are deliberately kept out of _searched_this_turn (a retry after a
+        # transient error is legitimate), so the budget must count attempts
+        # or a persistently failing query loops to the LLM-call cap.
+        self._search_attempts_this_turn: dict[str, int] = {}
 
     # ── Context buffer helpers ───────────────────────────────────
 
@@ -164,6 +169,7 @@ class ActionExecutor:
         self._llm_calls_this_turn.pop(sender_phone, None)
         self._turn_start_ts.pop(sender_phone, None)
         self._searched_this_turn.pop(sender_phone, None)
+        self._search_attempts_this_turn.pop(sender_phone, None)
 
     async def handle_message(
         self,
@@ -203,6 +209,7 @@ class ActionExecutor:
         self._llm_calls_this_turn[sender_phone] = 0
         self._turn_start_ts[sender_phone] = time.time()
         self._searched_this_turn[sender_phone] = set()
+        self._search_attempts_this_turn[sender_phone] = 0
 
         # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
@@ -328,7 +335,13 @@ class ActionExecutor:
                 query = decision.query or decision.message
                 searched = self._searched_this_turn.get(sender_phone, set())
                 repeat = normalize_search_query(query, decision.media_type) in searched
-                exhausted = len(searched) >= self.MAX_SEARCHES_PER_TURN
+                # Budget counts ATTEMPTS — failed searches don't enter the
+                # repeat set, so counting completions alone would let a
+                # persistently failing query loop to the LLM-call cap
+                exhausted = (
+                    self._search_attempts_this_turn.get(sender_phone, 0)
+                    >= self.MAX_SEARCHES_PER_TURN
+                )
                 if repeat or exhausted:
                     log.warning(
                         "LLM picked action=search in respond (scenario=%s) but %r "

@@ -23,6 +23,11 @@ async def handle_search(
 ) -> str:
     """Execute a search action: search Seerr, LLM responds, THEN send poster."""
     query = decision.query or decision.message
+    # Count the attempt regardless of outcome — the per-turn search budget
+    # in _llm_respond keys off attempts, not completions
+    executor._search_attempts_this_turn[sender_phone] = (
+        executor._search_attempts_this_turn.get(sender_phone, 0) + 1
+    )
     try:
         results = await executor.seerr.search(query, media_type=decision.media_type)
     except SeerrSearchError:

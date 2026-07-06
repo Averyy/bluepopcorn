@@ -21,7 +21,7 @@ seerr_details(tmdb_id: int, media_type: "movie"|"tv")
 
 seerr_request(tmdb_id: int, media_type: "movie"|"tv", seasons?: int[])
   Request download. Deduplicates (per-season for TV when seasons given). TV auto-fetches all seasons unless specified. Search first — never guess IDs.
-  Returns: {requested: true, title, tmdb_id, media_type, request_id} | {already_exists: true, title, status, tmdb_id, media_type}
+  Returns: {requested: true, title, tmdb_id, media_type, request_id} | {already_exists: true, title, status, tmdb_id, media_type, seasons?}
 
 seerr_recommend(genre?: string, keyword?: string, similar_to?: string, trending?: bool, upcoming?: bool, media_type?: string, year?: int, year_end?: int, count?: int, exclude_ids?: int[])
   Discover by genre/keyword/similarity/trending/year. At least one criterion required. Compound genres work ("sci-fi comedy"). year/year_end give a range; count caps results (max 10).
@@ -279,6 +279,10 @@ CONTEXT_SEARCH_REPEAT = (
 CONTEXT_SEARCH_BUDGET = (
     '[Search limit reached for this turn — do not search again. '
     'Reply using the results already shown above.]'
+)
+CONTEXT_REQUEST_SUBMITTED = (
+    '[Request submitted successfully: {title} tmdb:{tmdb_id} {media_type} '
+    '— the download has been queued. Confirm this to the user.]'
 )
 
 # ── Call-2 instructions (keyed by scenario) ───────────────────────────
