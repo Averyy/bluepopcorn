@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import logging
 import time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
@@ -18,6 +19,7 @@ from ..seerr import SeerrClient
 from ..sender import MessageSender
 from ..prompts import (
     CONTEXT_EMPTY_REPLY,
+    CONTEXT_SEARCH_REPEAT,
     CONVERSATION_GAP,
     CURRENT_MESSAGE_DELIMITER,
     ERROR_AUTH,
@@ -28,7 +30,7 @@ from ..prompts import (
 )
 from ..schemas import RESPOND_SCHEMA, TAG_CONTEXT, TAG_MEMORY
 from ..types import Action, HistoryEntry, LLMDecision, SearchResult
-from ..utils import mask_phone
+from ..utils import mask_phone, normalize_search_query
 
 # Handler imports
 from .search import handle_search
@@ -89,6 +91,11 @@ class ActionExecutor:
         # _last_topic was set during this turn (authoritative — came from
         # a real Seerr result just now) vs carried over from a prior turn.
         self._turn_start_ts: dict[str, float] = {}
+        # Normalized queries already searched this turn. Re-running an
+        # identical search adds no information — the results are already
+        # in context — and identical prompts make the LLM repeat the same
+        # decision until MAX_LLM_CALLS_PER_TURN aborts the turn.
+        self._searched_this_turn: dict[str, set[str]] = {}
 
     # ── Context buffer helpers ───────────────────────────────────
 
@@ -140,6 +147,14 @@ class ActionExecutor:
     MAX_LLM_CALLS_PER_TURN = 6
     MAX_TURN_WALL_SECONDS = 90.0
 
+    def _clear_turn_state(self, sender_phone: str) -> None:
+        """Drop all per-turn state after a turn completes or aborts."""
+        self._prompt_cache.pop(sender_phone, None)
+        self._prompt_cache_ctx_count.pop(sender_phone, None)
+        self._llm_calls_this_turn.pop(sender_phone, None)
+        self._turn_start_ts.pop(sender_phone, None)
+        self._searched_this_turn.pop(sender_phone, None)
+
     async def handle_message(
         self,
         sender_phone: str,
@@ -165,10 +180,7 @@ class ActionExecutor:
                 text[:80],
                 self._llm_calls_this_turn.get(sender_phone, 0),
             )
-            self._prompt_cache.pop(sender_phone, None)
-            self._prompt_cache_ctx_count.pop(sender_phone, None)
-            self._llm_calls_this_turn.pop(sender_phone, None)
-            self._turn_start_ts.pop(sender_phone, None)
+            self._clear_turn_state(sender_phone)
             return ERROR_GENERIC
 
     async def _handle_message_inner(
@@ -180,6 +192,7 @@ class ActionExecutor:
         self._track_cli(sender_phone, "user", text)
         self._llm_calls_this_turn[sender_phone] = 0
         self._turn_start_ts[sender_phone] = time.time()
+        self._searched_this_turn[sender_phone] = set()
 
         # Build prompt from conversation history (cache for _llm_respond reuse)
         prompt = await self._build_prompt(sender_phone)
@@ -205,28 +218,19 @@ class ActionExecutor:
             log.info("LLM action=%s query=%s tmdb_id=%s", decision.action.value, decision.query or "-", decision.tmdb_id or "-")
         except LLMAuthError as e:
             log.error("LLM auth failed: %s", e)
-            self._prompt_cache.pop(sender_phone, None)
-            self._prompt_cache_ctx_count.pop(sender_phone, None)
-            self._llm_calls_this_turn.pop(sender_phone, None)
-            self._turn_start_ts.pop(sender_phone, None)
+            self._clear_turn_state(sender_phone)
             return ERROR_AUTH
         except Exception as e:
             log.error("LLM call failed: %s", e)
-            self._prompt_cache.pop(sender_phone, None)
-            self._prompt_cache_ctx_count.pop(sender_phone, None)
-            self._llm_calls_this_turn.pop(sender_phone, None)
-            self._turn_start_ts.pop(sender_phone, None)
+            self._clear_turn_state(sender_phone)
             return ERROR_GENERIC
 
         # Execute the action
         try:
             response = await self._execute(decision, sender_phone, text)
         finally:
-            # Clear prompt cache after message is fully handled (or on error)
-            self._prompt_cache.pop(sender_phone, None)
-            self._prompt_cache_ctx_count.pop(sender_phone, None)
-            self._llm_calls_this_turn.pop(sender_phone, None)
-            self._turn_start_ts.pop(sender_phone, None)
+            # Clear per-turn state after message is fully handled (or on error)
+            self._clear_turn_state(sender_phone)
         self._track_cli(sender_phone, "assistant", response)
 
         return response
@@ -288,8 +292,24 @@ class ActionExecutor:
             # results. RESPOND_SCHEMA enumerates only reply/request but
             # tool_use enums aren't strictly enforced, and Haiku has been
             # seen to pick action=search when 0 results came back. Honor
-            # it — MAX_LLM_CALLS_PER_TURN bounds the worst case.
+            # it ONLY for queries not already searched this turn — an
+            # identical search returns identical results, so the LLM makes
+            # the same decision again and loops until the call cap aborts
+            # the turn (the 2026-07-05/06 "Hidden Figures"/"Green Book"
+            # incidents).
             if decision.action == Action.SEARCH and (decision.query or decision.message):
+                query = decision.query or decision.message
+                if normalize_search_query(query) in self._searched_this_turn.get(sender_phone, set()):
+                    log.warning(
+                        "LLM picked action=search in respond (scenario=%s) but "
+                        "%r was already searched this turn — forcing reply from context",
+                        scenario, query,
+                    )
+                    if scenario == "forced_reply":
+                        log.error("forced_reply still returned action=search — giving up")
+                        return ERROR_GENERIC, False
+                    self._add_context(sender_phone, CONTEXT_SEARCH_REPEAT.format(query=query))
+                    return await self._llm_respond(sender_phone, scenario="forced_reply")
                 log.info(
                     "LLM picked action=search in respond (scenario=%s); "
                     "executing refined search",
@@ -299,11 +319,17 @@ class ActionExecutor:
             # Only accept reply — any other action means the LLM is confused
             if decision.action == Action.REPLY and decision.message and len(decision.message.strip()) > 2:
                 return decision.message, multi
+            # Confused output (e.g. request without a tmdb_id): retry once
+            # with a reply-only instruction instead of erroring at the user.
             log.warning(
-                "LLM response returned action=%s message=%r instead of reply, using fallback",
-                decision.action.value, (decision.message or "")[:100],
+                "LLM response returned action=%s message=%r instead of reply "
+                "(scenario=%s)",
+                decision.action.value, (decision.message or "")[:100], scenario,
             )
-            return ERROR_GENERIC, False
+            if scenario == "forced_reply":
+                log.error("forced_reply still did not produce a reply — giving up")
+                return ERROR_GENERIC, False
+            return await self._llm_respond(sender_phone, scenario="forced_reply")
         except LLMAuthError as e:
             log.error("LLM response auth failed: %s", e)
             return ERROR_AUTH, False

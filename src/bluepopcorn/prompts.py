@@ -272,6 +272,10 @@ CONTEXT_COLLECTION_FAILED = "Failed to request: {titles}"
 CONTEXT_COLLECTION_NONE = "No movies to request"
 CONTEXT_COLLECTION_FOOTER = "]"
 CONTEXT_SEASON_INVALID = '[Season selection: requested seasons {requested} not found. Available: {available}]'
+CONTEXT_SEARCH_REPEAT = (
+    '[Search for "{query}" already ran this turn — do not search again. '
+    'Use the results (or lack of results) already shown above.]'
+)
 
 # ── Call-2 instructions (keyed by scenario) ───────────────────────────
 # Each is the full [INSTRUCTION: ...] text appended after context.
@@ -355,6 +359,15 @@ INSTRUCTION: dict[str, str] = {
     "empty_reply": (
         "Use action=reply. Respond to the user's current message based on the conversation history. "
         "You must provide a non-empty message."
+    ),
+    "forced_reply": (
+        "Use action=reply ONLY. Do NOT use action=search, action=recommend, or action=request. "
+        "Answer the user using ONLY the information already in the context above. "
+        "If search results are present: one clear match — focus on it and state its status "
+        "exactly as shown; multiple plausible matches — number them, ask which one, "
+        "and set multiple_results=true. "
+        "If a search found nothing, say you couldn't find it and suggest a different name or spelling. "
+        "Never invent titles, statuses, or IDs. You must provide a non-empty message."
     ),
     "collection_results": (
         "Use action=reply. A collection request was processed. "

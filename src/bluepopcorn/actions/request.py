@@ -17,11 +17,14 @@ from ..prompts import (
     CONTEXT_COLLECTION_NONE,
     CONTEXT_COLLECTION_REQUESTED,
     CONTEXT_DEDUP,
+    CONTEXT_SEARCH_EMPTY,
+    CONTEXT_SEARCH_REPEAT,
     CONTEXT_SEASON_INVALID,
     ERROR_GENERIC,
 )
 from ..seerr import SeerrClient, seerr_title
 from ..types import LLMDecision, MediaStatus, STATUS_LABELS
+from ..utils import normalize_search_query
 from ._base import format_search_results
 
 log = logging.getLogger(__name__)
@@ -170,6 +173,24 @@ async def handle_request(
         # returns 0 results even when "Title" works.
         search_term = re.sub(r"\s*\(\d{4}\)\s*$", "", search_term).strip() or search_term
         if search_term:
+            # Same-turn loop guard: if this term was already searched, the
+            # outcome is in context — re-searching just reproduces the same
+            # prompt and the LLM hallucinates a fresh tmdb_id each cycle
+            # (the 2026-06-21 "The Best Offer" incident).
+            if normalize_search_query(search_term) in executor._searched_this_turn.get(
+                sender_phone, set()
+            ):
+                log.warning(
+                    "Skipping fallback search for %r — already searched this "
+                    "turn; forcing reply from context", search_term,
+                )
+                executor._add_context(
+                    sender_phone, CONTEXT_SEARCH_REPEAT.format(query=search_term)
+                )
+                return (await executor._llm_respond(sender_phone, scenario="forced_reply"))[0]
+            executor._searched_this_turn.setdefault(sender_phone, set()).add(
+                normalize_search_query(search_term)
+            )
             try:
                 results = await executor.seerr.search(search_term)
                 if results:
@@ -180,6 +201,12 @@ async def handle_request(
                     year_str = f" ({top.year})" if top.year else ""
                     executor.set_topic(
                         sender_phone, f"{top.title}{year_str}", top.tmdb_id, top.media_type,
+                    )
+                else:
+                    # Tell the LLM the search came up empty — without this it
+                    # sees no outcome and invents a tmdb_id on the next call.
+                    executor._add_context(
+                        sender_phone, CONTEXT_SEARCH_EMPTY.format(query=search_term)
                     )
             except Exception as e:
                 log.debug("Fallback search for request failed: %s", e)

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 from ..prompts import CONTEXT_SEARCH_EMPTY, CONTEXT_SEARCH_ERROR, ERROR_GENERIC
 from ..seerr import SeerrSearchError
 from ..types import LLMDecision
+from ..utils import normalize_search_query
 from ._base import format_search_results
 
 log = logging.getLogger(__name__)
@@ -22,6 +23,11 @@ async def handle_search(
 ) -> str:
     """Execute a search action: search Seerr, LLM responds, THEN send poster."""
     query = decision.query or decision.message
+    # Record the query so _llm_respond / handle_request can refuse an
+    # identical re-search later in this turn (same-turn loop guard).
+    executor._searched_this_turn.setdefault(sender_phone, set()).add(
+        normalize_search_query(query)
+    )
     try:
         results = await executor.seerr.search(query, media_type=decision.media_type)
     except SeerrSearchError:

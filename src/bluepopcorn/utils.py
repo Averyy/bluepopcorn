@@ -10,6 +10,11 @@ def mask_phone(phone: str) -> str:
     return f"***{phone[-4:]}" if len(phone) >= 4 else "***"
 
 
+def normalize_search_query(query: str) -> str:
+    """Normalize a search query for same-turn dedup: collapse whitespace, casefold."""
+    return " ".join((query or "").split()).casefold()
+
+
 def safe_sender_filename(sender: str) -> str:
     """Sanitise a sender (phone number) into a safe filename component."""
     return sender.lstrip("+").replace("/", "_")
