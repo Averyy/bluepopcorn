@@ -181,7 +181,7 @@ You respond with a JSON object containing an action and a message. Available act
 - If the user says a number ("1", "2", etc.), they're picking from the last search results.
 - When the user asks what you know about them, use **reply** and reference the information in the `<memory>` block. The bot learns preferences automatically from conversations — users cannot explicitly add or remove them. If someone asks you to remember or forget something, use **reply** and let them know preferences are picked up automatically over time.
 - Only use **reply** for casual conversation that genuinely has nothing to do with movies, shows, or media. NEVER use reply when the user asks about a title's status, availability, or download progress — always use **search** instead, even if you think you already know the answer from context.
-- **When in doubt, search instead of asking.** If the user's message is short and ambiguous but could plausibly be a movie or TV show title — even if it sounds like slang, an exclamation, or a complaint (e.g. "Balls up", "Squid", "The Bear") — use **search** with the exact message text as the query. Searching is cheap; asking "what do you mean?" or "are you looking for a movie or show?" wastes a turn and annoys the user. The only time to ask a clarifying question first is when the message is clearly conversational (a greeting, "thanks", "ok", a question about you or memory) AND has no chance of being a title. If the search returns nothing, the system will tell you and you can ask then.
+- **When in doubt, search instead of asking.** If the user's message is short and ambiguous but could plausibly be a movie or TV show title — even if it sounds like slang, an exclamation, a complaint, or a COMMAND AIMED AT YOU (e.g. "Balls up", "Squid", "The Bear", "Analyze this", "Get out", "Don't look up", "Look both ways") — use **search** with the exact message text as the query. Many titles read like instructions; a short imperative is almost never actually an instruction to you. Searching is cheap; asking "what do you mean?" or "are you looking for a movie or show?" wastes a turn and annoys the user. The only time to ask a clarifying question first is when the message is clearly conversational (a greeting, "thanks", "ok", a question about you or memory) AND has no chance of being a title. If the search returns nothing, the system will tell you and you can ask then.
 - Keep the message field short and natural. No markdown, no formatting.
 - Focus on the `<current_user_message>` tag. Messages tagged `<user>` and `<assistant>` are conversation history for context only.
 
@@ -367,6 +367,17 @@ INSTRUCTION: dict[str, str] = {
     "empty_reply": (
         "Use action=reply. Respond to the user's current message based on the conversation history. "
         "You must provide a non-empty message."
+    ),
+    "clarify_probe": (
+        "You were about to ask the user a clarifying question, but their short "
+        "message was first searched literally as a title — the results are in the "
+        "context above. Use action=reply. If one of the results plausibly matches "
+        "what the user meant, present it: describe it, mention ratings if present, "
+        "and state its status exactly as shown; number the options and set "
+        "multiple_results=true if several are plausible. If NONE of the results "
+        "plausibly match and the message was clearly conversational, ignore the "
+        "results and respond to the message directly. Never mention that a search "
+        "was performed behind the scenes."
     ),
     "forced_reply": (
         "Use action=reply ONLY. Do NOT use action=search, action=recommend, or action=request. "

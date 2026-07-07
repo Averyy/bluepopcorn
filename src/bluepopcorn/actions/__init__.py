@@ -34,6 +34,7 @@ from ..types import Action, HistoryEntry, LLMDecision, SearchResult
 from ..utils import mask_phone, neutralize_brackets, normalize_search_query
 
 # Handler imports
+from ._base import format_search_results
 from .search import handle_search
 from .request import handle_request
 from .recent import handle_recent
@@ -468,9 +469,73 @@ class ActionExecutor:
             return await handle_recommend(self, decision, sender_phone)
         else:  # REPLY
             if decision.message and decision.message.strip():
-                return decision.message.strip()
+                reply = decision.message.strip()
+                probed = await self._probe_title_before_clarifying(
+                    sender_phone, user_text, reply,
+                )
+                if probed is not None:
+                    return probed
+                return reply
             self._add_context(sender_phone, CONTEXT_EMPTY_REPLY)
             return (await self._llm_respond(sender_phone, scenario="empty_reply"))[0]
+
+    # Messages that are pure conversation — never probe-search these.
+    # Routing heuristic, not LLM-facing text.
+    _CONVERSATIONAL_TOKENS = {
+        "hi", "hello", "hey", "yo", "sup",
+        "thanks", "thank you", "thx", "ty",
+        "ok", "okay", "k", "kk", "cool", "nice", "great", "perfect", "awesome",
+        "yes", "yeah", "yep", "yup", "no", "nope", "nah", "sure", "maybe",
+        "good morning", "good night", "goodnight", "gm", "gn",
+        "lol", "haha", "lmao", "wow",
+        "never mind", "nevermind", "nvm", "stop", "cancel",
+    }
+
+    async def _probe_title_before_clarifying(
+        self, sender_phone: str, user_text: str, reply: str
+    ) -> str | None:
+        """Probe-search a short message before sending a clarifying question.
+
+        Short imperatives ("Analyze this", "Get out") are usually titles,
+        but call 1 sometimes reads them as instructions and asks what the
+        user means. When the reply is a question and the message is short
+        and title-plausible, search the exact text first; only if nothing
+        matches does the clarification go out (2026-07-07 "Analyze this"
+        incident). Returns None to send the original reply unchanged.
+        """
+        if "?" not in reply:
+            return None  # not a clarification — normal conversational reply
+        text = user_text.strip()
+        if not text or "?" in text:
+            return None  # user asked a question; the reply answers it
+        if not 1 <= len(text.split()) <= 6:
+            return None
+        if text.lower().rstrip(".!") in self._CONVERSATIONAL_TOKENS:
+            return None
+        self._search_attempts_this_turn[sender_phone] = (
+            self._search_attempts_this_turn.get(sender_phone, 0) + 1
+        )
+        try:
+            results = await self.seerr.search(text)
+        except Exception as e:
+            log.debug("Title probe search failed for %r: %s", text, e)
+            return None
+        if not results:
+            log.info("Title probe for %r found nothing — sending clarification", text)
+            return None
+        log.info(
+            "Reply-with-question for short message %r — title probe found %d "
+            "result(s); presenting instead of clarifying", text, len(results),
+        )
+        self._searched_this_turn.setdefault(sender_phone, set()).add(
+            normalize_search_query(text)
+        )
+        await self._enrich_results(results, enrich_downloads=True)
+        self._add_context(sender_phone, format_search_results(results, query=text))
+        # No set_topic / no posters here: the LLM may still judge the message
+        # conversational and ignore the results — a wrong topic or stray
+        # poster would outlive that judgment.
+        return (await self._llm_respond(sender_phone, scenario="clarify_probe"))[0]
 
     async def _prepare_poster(self, result: SearchResult):
         """Download a single poster image. Returns local path or None."""
