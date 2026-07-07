@@ -20,7 +20,7 @@ Smart Seerr MCP server + iMessage bot. Claude Haiku via Anthropic SDK (API key) 
 - **After significant changes to prompts, actions, or LLM routing, run the conversation tests** -- `uv run python tests/test_conversations.py -s A,E,I` for a quick smoke test (~5 min), or the full suite for thorough validation. Significant = changes to prompts.py, actions/*.py, llm.py, or _build_prompt
 - **NEVER iterate on a fix by re-running live tests** -- live tests hit the real Anthropic API and cost real money. Fix the code, READ it, then run live ONCE to confirm. If you find a bug in the test or in your fix, do NOT immediately re-run live; read the diff, reason from code, mock if you need to iterate. A single recursive bug in handle_message can burn millions of tokens in seconds before you notice
 - **Tests with `--live` flag are gated** -- `tests/test_request_honesty.py` requires `--live` to hit the API. Default refuses to run. Respect this; do not bypass
-- **Test runs log into `bluepopcorn.log` with a `[TEST <label>]` prefix** -- e.g. `[TEST request-honesty]`, `[TEST conversations]`. To see only daemon traffic: `grep -v "\[TEST" bluepopcorn.log`. To see only test traffic: `grep "\[TEST" bluepopcorn.log`. Test process and daemon share the file; rotation is safe
+- **Test runs log into `bluepopcorn.log` with a `[TEST <label>]` prefix** -- e.g. `[TEST request-honesty]`, `[TEST conversations]`. To see only daemon traffic: `grep -v "\[TEST" bluepopcorn.log`. To see only test traffic: `grep "\[TEST" bluepopcorn.log`. The daemon is the ONLY rotation owner — tests append without rotating, and launchd stdout/stderr goes to the separate `bluepopcorn.launchd.log` (two RotatingFileHandlers in separate processes clobber each other's backups)
 - **Two safeguards exist in `actions/__init__.py`** -- `MAX_LLM_CALLS_PER_TURN=6` caps LLM calls per `handle_message` cycle, `MAX_TURN_WALL_SECONDS=90` caps wall-clock per turn. Do not raise these without good reason. If a real flow hits the cap, the fix is to remove the recursion, not raise the cap
 - **ALL LLM-facing text must live in `prompts.py`** -- system prompt, status labels, context templates, scenario instructions, compression prompts, error messages. Never hardcode prompt strings in handler files. NEVER move LLM-facing text out of prompts.py into other modules to solve import issues — fix the import issue instead
 - **ALL JSON schemas must live in `schemas.py`** -- decide schema, respond schema, compression schemas. Never define schemas inline in other files
@@ -43,8 +43,9 @@ imessage/restart.sh                   # Restart daemon after Python changes
 tail -30 bluepopcorn.log              # Recent logs (adjust count as needed)
 
 # Tests
+uv run pytest tests/test_unbacked_tmdb_loop.py tests/test_clarify_probe.py tests/test_request_media_type.py tests/test_morning_digest.py tests/test_attributed_body.py -q  # Full fast mocked suite
 uv run pytest tests/test_morning_digest.py -v             # Digest unit tests (fast, mocked)
-uv run pytest tests/test_mcp_tools.py -m integration -v  # MCP integration tests
+uv run pytest tests/test_mcp_tools.py -m integration -v  # MCP integration tests (live Seerr, read-only)
 uv run python tests/test_conversations.py              # Full suite (A-Z + DIGEST)
 uv run python tests/test_conversations.py -s A,E,I     # Smoke test (3 scenarios)
 uv run python tests/test_conversations.py -s DIGEST    # Digest-only live tests
@@ -116,7 +117,10 @@ bluepopcorn/
     restart.sh              # Daemon restart
   tests/
     test_morning_digest.py  # Digest unit tests (mocked, fast)
-    test_mcp_tools.py       # MCP integration tests
+    test_unbacked_tmdb_loop.py # LLM loop-guard regression tests (mocked, fast)
+    test_clarify_probe.py   # Title-probe-before-clarifying tests (mocked, fast)
+    test_request_media_type.py # tmdb/media_type backing-check tests (mocked, fast)
+    test_mcp_tools.py       # MCP integration tests (live Seerr, read-only)
     test_conversations.py   # iMessage conversation tests + digest live tests
 ```
 

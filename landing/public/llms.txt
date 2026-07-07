@@ -39,8 +39,10 @@ iMessage (macOS): uv sync --extra imessage && uv run -m bluepopcorn
 SEERR_URL=http://seerr:5055 (required)
 SEERR_API_KEY=... (required)
 MCP_API_KEY=... (HTTP mode, comma-separated for rotation)
+MCP_TRUST_PROXY=false (set true only behind a trusted reverse proxy; honors X-Forwarded-For for auth rate limiting)
 ANTHROPIC_API_KEY=... (iMessage bot)
 ALLOWED_SENDERS=+1234567890 (iMessage bot, E.164)
+WEBHOOK_SECRET=... (iMessage bot, recommended — Seerr webhook auth; without it webhooks rely on IP filtering alone)
 HTTP_PORT=8080
 HTTP_HOST=127.0.0.1
 
@@ -55,7 +57,7 @@ Config: imessage/config.toml
 
 ### Morning Digest
 
-Daily digest at configured time (default 8:00 AM), composed per-user by Claude Haiku.
+Daily digest at configured time (default 7:30 AM), composed per-user by Claude Haiku.
 Includes recently available titles, pending request count, and one trending suggestion
 matched to the user's taste (respects likes/dislikes from conversation memory).
 Tracks suggested IDs to rotate recommendations. Skips sending if nothing new to report.

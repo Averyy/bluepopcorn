@@ -84,8 +84,8 @@ Same JSON config as above in the client's MCP settings file.
 | `seerr_search` | Search movies and TV shows by title | `query`, `media_type?` |
 | `seerr_details` | Full details by TMDB ID (ratings, trailers, seasons) | `tmdb_id`, `media_type` |
 | `seerr_request` | Request a title for download (dedup built-in) | `tmdb_id`, `media_type`, `seasons?` |
-| `seerr_recommend` | Discover by genre, keyword, similarity, or trending | `genre?`, `keyword?`, `similar_to?`, `trending?`, `upcoming?` |
-| `seerr_recent` | Recently added and pending requests | `page?`, `limit?` |
+| `seerr_recommend` | Discover by genre, keyword, similarity, trending, or year | `genre?`, `keyword?`, `similar_to?`, `trending?`, `upcoming?`, `media_type?`, `year?`, `year_end?`, `count?`, `exclude_ids?` |
+| `seerr_recent` | Recently added and pending requests (with totals for pagination) | `page?`, `limit?` |
 
 ## Environment Variables
 
@@ -97,8 +97,10 @@ Same JSON config as above in the client's MCP settings file.
 | `HTTP_PORT` | No | HTTP listen port (default `8080`) |
 | `HTTP_HOST` | No | HTTP listen host (default `127.0.0.1`) |
 | `HTTP_TIMEOUT` | No | Seerr API timeout in seconds (default `15`) |
+| `MCP_TRUST_PROXY` | No | Set `true` only behind a trusted reverse proxy — honors `X-Forwarded-For` for auth rate limiting (default `false`; the header is client-controlled otherwise) |
 | `ANTHROPIC_API_KEY` | iMessage | Anthropic API key for the iMessage bot (required for production; without it, falls back to Claude Code CLI which requires daily manual login) |
 | `ALLOWED_SENDERS` | iMessage | E.164 phone numbers allowed to use the bot (comma-separated) |
+| `WEBHOOK_SECRET` | iMessage (recommended) | Shared secret for Seerr webhook auth. Without it, webhooks rely on IP filtering alone and are rejected entirely if the Seerr host can't be resolved |
 
 ## iMessage Bot (optional, macOS only)
 
